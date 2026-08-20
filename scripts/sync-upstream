@@ -67,9 +67,14 @@ fi
 if ! uvx ruff@0.15.18 check . \
   || ! uvx ruff@0.15.18 format --check . \
   || ! ./tests/run-all --fail-fast \
-  || ! git diff --check; then
+  || ! git diff --cached --check; then
   git merge --abort
   echo "upstream merge failed verification; restored fork head $before" >&2
+  exit 3
+fi
+if ! git diff --quiet || [[ -n $(git ls-files --others --exclude-standard) ]]; then
+  git merge --abort
+  echo "verification modified the worktree; restored fork head $before" >&2
   exit 3
 fi
 
