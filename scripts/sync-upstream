@@ -57,6 +57,13 @@ fi
 
 # Mirror the public CI gates before creating or pushing the merge commit. Failure aborts the tentative
 # merge, so a review launcher can never mistake an unverified integration for a usable fork head.
+# Two upstream standalone probes are not portable to macOS: kiro.py assumes XDG_DATA_HOME and
+# worker_manager.py expects the Linux manager child. The production machine runs every other test
+# locally, then requires the full Linux GitHub Actions result on the resulting dev commit.
+if [[ $(uname -s) == Darwin ]]; then
+  export TAUCETI_TEST_SKIP=kiro.py,worker_manager.py
+  echo "macOS local gate: deferring kiro.py and worker_manager.py to required public Linux CI"
+fi
 if ! uvx ruff@0.15.18 check . \
   || ! uvx ruff@0.15.18 format --check . \
   || ! ./tests/run-all --fail-fast \

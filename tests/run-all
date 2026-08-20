@@ -11,6 +11,9 @@
 # The Python version is taken from $UV_PYTHON when set (uv honours it), so CI can matrix over versions.
 #
 # Usage: tests/run-all [--fail-fast]
+#
+# TAUCETI_TEST_SKIP may contain a comma-separated list of classified test basenames. It is intended
+# for a platform-local gate only; public CI deliberately leaves it unset and runs the full suite.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -91,11 +94,24 @@ RUN_SH=(docker_entrypoint.sh lifecycle.sh)
 # deliberately not run here (needs the bubble sandbox/proxy)
 SKIP=(egress.sh)
 
-pass=0; fail=0; failed=()
+pass=0; fail=0; failed=(); platform_skipped=()
+
+should_platform_skip() {
+  local label=$1
+  local configured=",${TAUCETI_TEST_SKIP:-},"
+  [[ $configured == *",$label,"* ]]
+}
 
 # run <label> <cmd...> : run a test, tally the result, honour --fail-fast
 run() {
   local label="$1"; shift
+  if should_platform_skip "$label"; then
+    echo "== $label =="
+    echo "  [SKIP platform-local] $label"
+    echo
+    platform_skipped+=("$label")
+    return
+  fi
   echo "== $label =="
   if "$@"; then
     echo "  [PASS] $label"; pass=$((pass + 1))
@@ -110,6 +126,8 @@ summary() {
   echo "================================================================"
   echo "run-all: $pass passed, $fail failed"
   ((${#failed[@]})) && printf '  failed: %s\n' "${failed[@]}"
+  ((${#platform_skipped[@]})) \
+    && printf '  skipped (platform-local; full public CI required): %s\n' "${platform_skipped[@]}"
   ((${#SKIP[@]}))   && printf '  skipped (needs sandbox): %s\n' "${SKIP[@]}"
 }
 
@@ -126,6 +144,19 @@ if ((${#unclassified[@]})); then
   echo "ERROR: test file(s) not classified in tests/run-all (add to a RUN_* or SKIP list):" >&2
   printf '  - %s\n' "${unclassified[@]}" >&2
   exit 2
+fi
+
+if [[ -n ${TAUCETI_TEST_SKIP:-} ]]; then
+  IFS=, read -r -a requested_skips <<<"$TAUCETI_TEST_SKIP"
+  unknown_skips=()
+  for base in "${requested_skips[@]}"; do
+    [[ -n $base && "${known[*]}" == *" $base "* ]] || unknown_skips+=("${base:-<empty>}")
+  done
+  if ((${#unknown_skips[@]})); then
+    echo "ERROR: TAUCETI_TEST_SKIP contains unclassified test basename(s):" >&2
+    printf '  - %s\n' "${unknown_skips[@]}" >&2
+    exit 2
+  fi
 fi
 
 # --- run ------------------------------------------------------------------------------------------

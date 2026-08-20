@@ -10,3 +10,7 @@
 - Fork `main`: not managed by the production sync script; the repository owner updates it separately.
 
 No review round should install a moving branch. Pin the verified `dev` commit used for that round.
+
+On macOS, `scripts/sync-upstream` runs the full standalone suite except the two upstream probes that
+are Linux-specific in practice (`kiro.py` and `worker_manager.py`). The resulting `dev` commit must
+also pass the public Linux GitHub Actions suite before it is eligible for a review round.
