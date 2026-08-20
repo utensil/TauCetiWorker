@@ -107,6 +107,8 @@ other top-level key is an error, as is any unrecognized field inside a
 | `roadmap_only` | string | unset | The single roadmap area for roadmap rounds. `""` means all areas; unset means a fresh random area each round |
 | `roadmap_skip` | string list | `[]` | Roadmap areas to exclude. `roadmap_only` wins on overlap |
 | `roadmap_extra_identities` | string list | `[]` | Extra GitHub logins whose claimed intentions count as this worker's own |
+| `review_roadmap` | string list | `[]` | Roadmap labels admitted to review, forwarded only as `--review-roadmap` CLI arguments |
+| `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
 | `source` | string | unset | Supplementary repository directory or URL. Requires `roadmap` in `only` and a non-empty `roadmap_only` |
 | `author_model` | string | unset | Exact authoring model. Requires an `agent` other than `auto` |
@@ -126,6 +128,13 @@ difference has no flag: an A/B of a build setting, for instance. It is part of
 the fingerprint, so editing it restarts that worker and leaves the others alone,
 and both `workers status` and the dashboard name the variables it sets, so the
 odd worker out is visible rather than mysterious.
+
+Review allowlists remain command-local from the Worker's perspective. The
+manager stores launcher desired state, then emits `review_roadmap` and
+`review_pr` only as explicit CLI arguments to the loop; it does not translate
+them into environment variables or mutable worker state. Put a private
+`workers.toml` under the operations project when the approval list itself is
+private.
 
 Put no secrets in it. The values are stored in plain `workers.toml`, and the
 whole worker definition is handed to its runner on a command line, where any
@@ -173,8 +182,9 @@ entry with `enabled = true`.
 | `--stream` | `stream` |
 | `--isolate-home` | `isolate_home`; useful when the id is `default` |
 
-`add` cannot set `roadmap_extra_identities`, `respect_claims`, or `restart`, and
-always writes `enabled = true`. Use `workers edit` for those.
+`add` cannot set `roadmap_extra_identities`, `review_roadmap`, `review_pr`,
+`respect_claims`, or `restart`, and always writes `enabled = true`. Use
+`workers edit` for those.
 
 ## Actions
 
