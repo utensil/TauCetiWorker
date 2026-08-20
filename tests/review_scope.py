@@ -81,10 +81,11 @@ sv = scoped(["RepresentationTheory"], [2])
 check("excluded candidates are observable", [c.pr for c in sv.review_scope_excluded], [3, 5, 7])
 check("another work stage is untouched", [c.pr for c in sv.needs_fix.actionable], [99])
 
-saved = {name: os.environ.get(name) for name in ("TAUCETI_REVIEW_ROADMAPS", "TAUCETI_REVIEW_PRS")}
+poison_names = ("TAUCETI_REVIEW_ROADMAPS", "TAUCETI_REVIEW_PRS")
+saved = {name: os.environ.get(name) for name in poison_names}
 try:
-    os.environ.pop("TAUCETI_REVIEW_ROADMAPS", None)
-    os.environ.pop("TAUCETI_REVIEW_PRS", None)
+    os.environ["TAUCETI_REVIEW_ROADMAPS"] = "HiddenRoadmap"
+    os.environ["TAUCETI_REVIEW_PRS"] = "999"
     parser = argparse.ArgumentParser()
     tc.add_review_scope_flags(parser)
     args = parser.parse_args(
@@ -100,45 +101,49 @@ try:
     check("repeatable roadmap flag parses", args.review_roadmap, ["RepresentationTheory,ReductiveGroups"])
     check("repeatable PR flag parses", args.review_pr, ["3809", "3871,3827"])
     check(
-        "CLI scope is normalized and installed for loop children",
-        tc.install_review_scope(args),
+        "CLI scope is normalized without Worker state",
+        tc.parse_review_scope(args),
         (["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871]),
     )
+    check("ambient roadmap value is ignored and untouched", os.environ["TAUCETI_REVIEW_ROADMAPS"], "HiddenRoadmap")
+    check("ambient PR value is ignored and untouched", os.environ["TAUCETI_REVIEW_PRS"], "999")
     check(
-        "roadmap environment installed", os.environ["TAUCETI_REVIEW_ROADMAPS"], "RepresentationTheory,ReductiveGroups"
+        "no CLI scope stays unscoped despite ambient poison",
+        tc.parse_review_scope(SimpleNamespace(review_roadmap=None, review_pr=None)),
+        ([], []),
     )
-    check("PR environment installed", os.environ["TAUCETI_REVIEW_PRS"], "3809,3871,3827")
+    check(
+        "loop children receive scope only as explicit argv",
+        tc.review_scope_tail(["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871]),
+        [
+            "--review-roadmap",
+            "ReductiveGroups,RepresentationTheory",
+            "--review-pr",
+            "3809,3827,3871",
+        ],
+    )
 
-    os.environ["TAUCETI_REVIEW_ROADMAPS"] = "HiddenRoadmap"
-    os.environ["TAUCETI_REVIEW_PRS"] = "999"
-    exact_cli = tc.install_review_scope(SimpleNamespace(review_roadmap=["RepresentationTheory"], review_pr=None))
-    check("any CLI scope replaces the complete ambient scope", exact_cli, (["RepresentationTheory"], []))
-    check("omitted CLI counterpart is cleared", "TAUCETI_REVIEW_PRS" in os.environ, False)
-
-    os.environ["TAUCETI_REVIEW_PRS"] = "9,nope"
     try:
-        tc.review_prs()
+        tc.parse_review_scope(SimpleNamespace(review_roadmap=None, review_pr=["9,nope"]))
     except tc.Die:
         malformed_pr_rejected = True
     else:
         malformed_pr_rejected = False
-    check("malformed PR environment fails loudly", malformed_pr_rejected, True)
+    check("malformed PR CLI fails loudly", malformed_pr_rejected, True)
 
-    os.environ["TAUCETI_REVIEW_PRS"] = "9"
-    os.environ["TAUCETI_REVIEW_ROADMAPS"] = "Representation Theory"
     try:
-        tc.review_roadmaps()
+        tc.parse_review_scope(SimpleNamespace(review_roadmap=["Representation Theory"], review_pr=None))
     except tc.Die:
         malformed_area_rejected = True
     else:
         malformed_area_rejected = False
-    check("malformed roadmap environment fails loudly", malformed_area_rejected, True)
+    check("malformed roadmap CLI fails loudly", malformed_area_rejected, True)
 
     for attr, flag in (("review_roadmap", "--review-roadmap"), ("review_pr", "--review-pr")):
         values = {"review_roadmap": None, "review_pr": None}
         values[attr] = [" , "]
         try:
-            tc.install_review_scope(SimpleNamespace(**values))
+            tc.parse_review_scope(SimpleNamespace(**values))
         except tc.Die:
             empty_rejected = True
         else:

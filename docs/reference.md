@@ -168,8 +168,6 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `TAUCETI_FORK` | auto-created | Point at an existing fork instead of the one the worker creates. |
 | `TAUCETI_ROADMAP_ONLY` | _(unset)_ | The single roadmap area for `--roadmap-only`. Unset = a fresh random area each round (falls back to all areas if the list can't be fetched); `""` = all areas. |
 | `TAUCETI_ROADMAP_SKIP` | _(unset)_ | Comma-separated roadmap areas to exclude, for `--roadmap-skip`. |
-| `TAUCETI_REVIEW_ROADMAPS` | _(unset)_ | Comma-separated roadmap areas allowed into the review queue. Unioned with `TAUCETI_REVIEW_PRS`; both unset preserves the unscoped queue. |
-| `TAUCETI_REVIEW_PRS` | _(unset)_ | Comma-separated explicit PR numbers allowed into the review queue. Unioned with `TAUCETI_REVIEW_ROADMAPS`. |
 | `TAUCETI_ROADMAP_EXTRA_IDENTITIES` | _(unset)_ | Comma-separated extra GitHub logins whose claimed intentions count as the worker's own. |
 | `TAUCETI_RESPECT_CLAIMS` | `true` | Whether roadmap workers avoid others' claimed intentions; `false` is the same as `--ignore-claims`. |
 | `TAUCETI_QUOTA_CMD` | — | Default for `--quota-cmd`. |

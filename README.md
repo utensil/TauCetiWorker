@@ -144,10 +144,10 @@ tauceti work --loop --only review \
 tauceti status --review-roadmap RepresentationTheory --review-pr 3839 --json
 ```
 
-The equivalent inherited settings are `TAUCETI_REVIEW_ROADMAPS` and `TAUCETI_REVIEW_PRS`.
-They are useful for managed workers and ensure every loop child receives the same frozen scope. If
-either CLI scope flag is supplied, the CLI values define the complete scope and any omitted
-counterpart is cleared rather than inherited, preventing an ambient setting from widening a command.
+Review scope is deliberately CLI-only and stateless. It is never read from or written to environment,
+worker state, or preferences. A loop forwards its normalized scope flags explicitly to every round
+child. Managed workers can put the flags in their ordinary command options; the allowlist itself still
+exists only in process arguments.
 
 ### Keeping this scoped-review fork current
 

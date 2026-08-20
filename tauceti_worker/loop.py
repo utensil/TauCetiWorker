@@ -21,6 +21,16 @@ class _LoopTerminated(KeyboardInterrupt):
     """SIGTERM translated to the same teardown path as Ctrl-C, with the right exit code."""
 
 
+def review_scope_tail(roadmaps: list[str] | tuple[str, ...], prs: list[int] | tuple[int, ...]) -> list[str]:
+    """Explicit child argv for a stateless review scope."""
+    tail: list[str] = []
+    if roadmaps:
+        tail += ["--review-roadmap", ",".join(roadmaps)]
+    if prs:
+        tail += ["--review-pr", ",".join(str(pr) for pr in prs)]
+    return tail
+
+
 def _pace_wait_reason(window) -> str:
     """One soft pacing condition, formatted like quota.py without changing its control verdict."""
     relation = "=" if window.status == "at-budget" else ">"
@@ -67,7 +77,15 @@ def _wait_quota_line(snap: dict, *, markup: bool = True) -> str:
     return line.replace(old, new, 1)
 
 
-def cmd_loop(args, cfg: Config, *, only: list[str], agent: str) -> int:
+def cmd_loop(
+    args,
+    cfg: Config,
+    *,
+    only: list[str],
+    agent: str,
+    review_scope_roadmaps: list[str] | tuple[str, ...] = (),
+    review_scope_prs: list[int] | tuple[int, ...] = (),
+) -> int:
     """The driver: pace against quota (codex preferred), run ONE round as a child under a hard timeout,
     then settle (short pause if productive, escalating back-off otherwise). Ctrl-C stops the current
     round and exits. Keeps the escalating back-off that stopped ~700 no-op rounds hammering a
@@ -189,6 +207,7 @@ def cmd_loop(args, cfg: Config, *, only: list[str], agent: str) -> int:
 
             # 2) Run ONE round as a child in its own process group, under the hard timeout.
             tail = ["--worker-id", cfg.wid]
+            tail += review_scope_tail(review_scope_roadmaps, review_scope_prs)
             if only:
                 tail += ["--only", ",".join(only)]
             if model:

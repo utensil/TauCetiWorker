@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agents import (
@@ -109,6 +109,8 @@ class RoundOpts:
     # what every documented configuration gets.
     review_min_queue: int = 0  # review only when at least this many PRs are awaiting review
     review_min_age: int = 0  # minutes a PR must have been awaiting review before this worker takes it
+    review_scope_roadmaps: list[str] = field(default_factory=list)
+    review_scope_prs: list[int] = field(default_factory=list)
 
     @property
     def agent_name(self) -> str:
@@ -205,7 +207,15 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
     # credential mirror.
     if not opts.dry_run:
         mirror_creds(w.cfg)
-    sv = survey(w.cfg, w.gh, w.rs, w.counters, deep=True)
+    sv = survey(
+        w.cfg,
+        w.gh,
+        w.rs,
+        w.counters,
+        deep=True,
+        review_scope_roadmaps=getattr(opts, "review_scope_roadmaps", ()),
+        review_scope_prs=getattr(opts, "review_scope_prs", ()),
+    )
     if sv.github_failed:
         raise NoProgress("gh pr list failed (GitHub API?) — aborting round, not falling through to authoring")
 

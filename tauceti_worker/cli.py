@@ -19,6 +19,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -48,8 +49,6 @@ from .config import (
     auto_assign_wid,
     is_git_url,
     log,
-    review_prs,
-    review_roadmaps,
     roadmap_only,
     sanitize_wid,
     set_log_file,
@@ -111,8 +110,6 @@ environment (flags win; full reference linked below):
   TAUCETI_WORKER_ID      pins the worker id (else `work` auto-assigns worker1, worker2, ...)
   TAUCETI_ROADMAP_ONLY   single roadmap area (unset = a fresh random area each round; "" = all areas)
   TAUCETI_ROADMAP_SKIP   comma-separated roadmap areas to exclude from selection
-  TAUCETI_REVIEW_ROADMAPS  comma-separated roadmap areas allowed for review
-  TAUCETI_REVIEW_PRS       comma-separated PR numbers allowed for review
   TAUCETI_QUOTA_CMD      default for --quota-cmd
   TAUCETI_PACE           pacing curve "t:b,..." (default = 60:40); see --pace
   TAUCETI_AUTHORING_CODEX_MODEL / _EFFORT   exact Codex authoring profile
@@ -405,31 +402,32 @@ def resolve_review_throttle(cli_value: int | None, env: str, flag: str) -> int:
     return cli_value
 
 
-def install_review_scope(args) -> tuple[list[str], list[int]]:
-    """Install and validate review allowlists for this process and any loop children.
+def parse_review_scope(args) -> tuple[list[str], list[int]]:
+    """Validate explicit review allowlists without reading or writing environment/state.
 
-    CLI values replace their corresponding environment value. An explicitly supplied but empty flag
-    is rejected: accepting it as "no scope" would widen a supposedly rationed reviewer to every
-    actionable PR.
+    Scope is command-local. A loop forwards the normalized values as CLI arguments to every child;
+    the Worker never persists or inherits an allowlist from ambient configuration.
     """
 
-    roadmap_values = getattr(args, "review_roadmap", None)
-    pr_values = getattr(args, "review_pr", None)
-    cli_scope = roadmap_values is not None or pr_values is not None
-
-    def install(values, env: str, flag: str) -> None:
+    def tokens(values, flag: str) -> list[str]:
         if values is None:
-            if cli_scope:
-                os.environ.pop(env, None)
-            return
-        tokens = [token.strip() for value in values for token in value.split(",") if token.strip()]
-        if not tokens:
+            return []
+        out = [token.strip() for value in values for token in value.split(",") if token.strip()]
+        if not out:
             raise Die(f"{flag} must name at least one value")
-        os.environ[env] = ",".join(tokens)
+        return out
 
-    install(roadmap_values, "TAUCETI_REVIEW_ROADMAPS", "--review-roadmap")
-    install(pr_values, "TAUCETI_REVIEW_PRS", "--review-pr")
-    return review_roadmaps(), review_prs()
+    roadmaps: set[str] = set()
+    for token in tokens(getattr(args, "review_roadmap", None), "--review-roadmap"):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", token):
+            raise Die(f"--review-roadmap contains an invalid roadmap area: {token!r}")
+        roadmaps.add(token)
+    prs: set[int] = set()
+    for token in tokens(getattr(args, "review_pr", None), "--review-pr"):
+        if not token.isdigit() or int(token) <= 0:
+            raise Die(f"--review-pr contains an invalid PR number: {token!r}")
+        prs.add(int(token))
+    return sorted(roadmaps, key=str.casefold), sorted(prs)
 
 
 def resolve_agent(args) -> str:
@@ -689,12 +687,20 @@ def cmd_usage(args) -> int:
 
 
 def cmd_status(args) -> int:
-    install_review_scope(args)
+    review_scope_roadmaps, review_scope_prs = parse_review_scope(args)
     cfg = Config.resolve(getattr(args, "worker_id", None))
     gh = GitHub()
     rs = ReviewState(cfg, gh)
     counters = Counters(cfg)
-    sv = survey(cfg, gh, rs, counters, deep=True)
+    sv = survey(
+        cfg,
+        gh,
+        rs,
+        counters,
+        deep=True,
+        review_scope_roadmaps=review_scope_roadmaps,
+        review_scope_prs=review_scope_prs,
+    )
     _, quota_snap = Quota(cfg).choose(None)
 
     if getattr(args, "json", False):
@@ -716,7 +722,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             "--host is now the default (the agent runs directly on the host); it is a no-op. "
             "Pass --bubble to run inside the sandbox instead"
         )
-    install_review_scope(args)
+    review_scope_roadmaps, review_scope_prs = parse_review_scope(args)
     author_model = getattr(args, "author_model", None)
     author_effort = getattr(args, "author_effort", None)
     resolved_author_fallback_model = getattr(args, "resolved_author_fallback_model", None)
@@ -821,7 +827,14 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
         # its children get theirs. Check here too, so a wrong --account costs one command rather than a
         # full survey, and so the operator sees the message before the loop's own output buries it.
         raise_on_account_mismatch(cfg, getattr(args, "account", None), agent, "account")
-        return cmd_loop(args, cfg, only=only, agent=agent)
+        return cmd_loop(
+            args,
+            cfg,
+            only=only,
+            agent=agent,
+            review_scope_roadmaps=review_scope_roadmaps,
+            review_scope_prs=review_scope_prs,
+        )
     dry = getattr(args, "dry_run", False)
     ignore_quota = getattr(args, "ignore_quota", False)
     quota_cmd = getattr(args, "quota_cmd", None)
@@ -875,6 +888,8 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             account=getattr(args, "account", None),
             review_min_queue=review_min_queue,
             review_min_age=review_min_age,
+            review_scope_roadmaps=review_scope_roadmaps,
+            review_scope_prs=review_scope_prs,
         )
         # Before preflight, and NOT gated on --dry-run: --dry-run is how an operator checks their setup,
         # so it is the one run that most needs to answer "am I on the right account?". The check is a

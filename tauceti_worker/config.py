@@ -47,41 +47,6 @@ def roadmap_skip() -> list[str]:
     return sorted({tok for tok in (t.strip() for t in raw.split(",")) if tok})
 
 
-def review_roadmaps() -> list[str]:
-    """Roadmap areas allowed into this worker's review queue.
-
-    An empty list preserves the upstream unscoped queue. Area names use the conservative token shape
-    used by roadmap labels so malformed configuration cannot silently widen a review loop.
-    """
-    raw = os.environ.get("TAUCETI_REVIEW_ROADMAPS", "")
-    out: set[str] = set()
-    for token in (part.strip() for part in raw.split(",")):
-        if not token:
-            continue
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", token):
-            raise Die(f"$TAUCETI_REVIEW_ROADMAPS contains an invalid roadmap area: {token!r}")
-        out.add(token)
-    return sorted(out, key=str.casefold)
-
-
-def review_prs() -> list[int]:
-    """Explicit PR numbers allowed into this worker's review queue.
-
-    These are unioned with ``review_roadmaps()``. Invalid entries fail loudly rather than being
-    ignored, because silently dropping a human-approved PR would make a scoped loop idle for the
-    wrong reason.
-    """
-    raw = os.environ.get("TAUCETI_REVIEW_PRS", "")
-    out: set[int] = set()
-    for token in (part.strip() for part in raw.split(",")):
-        if not token:
-            continue
-        if not token.isdigit() or int(token) <= 0:
-            raise Die(f"$TAUCETI_REVIEW_PRS contains an invalid PR number: {token!r}")
-        out.add(int(token))
-    return sorted(out)
-
-
 def roadmap_extra_identities() -> list[str]:
     """Additional GitHub logins, beyond the worker's own `gh auth` identity, whose registered
     intentions this worker should treat as its own (so it won't avoid targets they've claimed).

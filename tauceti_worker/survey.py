@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
 
-from .config import Config, log, review_prs, review_roadmaps, roadmap_only, roadmap_skip
+from .config import Config, log, roadmap_only, roadmap_skip
 from .constants import (
     AUTO_STAGES,
     BUMP_HEAD_PREFIX,
@@ -534,7 +534,16 @@ def bust_progress_cache(cfg: Config) -> None:
         pass
 
 
-def survey(cfg: Config, gh: GitHub, rs: ReviewState, counters: Counters, *, deep: bool = True) -> Survey:
+def survey(
+    cfg: Config,
+    gh: GitHub,
+    rs: ReviewState,
+    counters: Counters,
+    *,
+    deep: bool = True,
+    review_scope_roadmaps: list[str] | tuple[str, ...] = (),
+    review_scope_prs: list[int] | tuple[int, ...] = (),
+) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
     `deep=False` skips the per-PR scoreboard reads (faster, coarse) for a quick glance; the picker
@@ -766,7 +775,7 @@ def survey(cfg: Config, gh: GitHub, rs: ReviewState, counters: Counters, *, deep
         c = Candidate(0, "", reason or "progress report")
         (sv.progress.actionable if due else sv.progress.suppressed).append(c)
 
-    scope_review_candidates(sv, review_roadmaps(), review_prs())
+    scope_review_candidates(sv, list(review_scope_roadmaps), list(review_scope_prs))
     sv.next_auto_stage = _next_auto_stage(sv)
     return sv
 
