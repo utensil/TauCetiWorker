@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Codex and Kiro review policy is independent from the authoring profile.
 
-Only $TAUCETI_REVIEW_CODEX_MODEL is forwarded to the engine; authoring model
-overrides must leave its default/fallback policy untouched.
+Only the explicit review model/effort profile is forwarded to the engine;
+authoring overrides must leave review policy untouched.
 """
 
 import os
@@ -35,6 +35,42 @@ os.environ["TAUCETI_REVIEW_CODEX_MODEL"] = "gpt-5.6-terra"
 check("set + codex -> value", f("codex") == "gpt-5.6-terra")
 check("set + claude -> None (not a codex reviewer)", f("claude") is None)
 check("set + 'claude,codex' -> value", f("claude,codex") == "gpt-5.6-terra")
+
+e = agents._codex_review_effort_override
+os.environ.pop("TAUCETI_REVIEW_CODEX_EFFORT", None)
+check("effort unset -> None", e("codex") is None)
+os.environ["TAUCETI_REVIEW_CODEX_EFFORT"] = "high"
+check("effort set + codex -> high", e("codex") == "high")
+check("effort set + claude -> None", e("claude") is None)
+os.environ["TAUCETI_REVIEW_CODEX_EFFORT"] = "unsupported"
+try:
+    e("codex")
+except Exception as exc:
+    check("invalid effort fails closed", "must be one of" in str(exc))
+else:
+    check("invalid effort fails closed", False)
+os.environ["TAUCETI_REVIEW_CODEX_EFFORT"] = "high"
+
+os.environ.pop("TAUCETI_REVIEW_ENGINE_REPO", None)
+os.environ.pop("TAUCETI_REVIEW_ENGINE_REF", None)
+check(
+    "default engine source preserves upstream", agents._review_engine_source() == ("TauCetiProject/TauCetiReview", "")
+)
+engine_sha = "a" * 40
+os.environ["TAUCETI_REVIEW_ENGINE_REPO"] = "utensil/TauCetiReview"
+os.environ["TAUCETI_REVIEW_ENGINE_REF"] = engine_sha
+check(
+    "custom engine source is exact",
+    agents._review_engine_uvx_source() == f"git+https://github.com/utensil/TauCetiReview.git@{engine_sha}",
+)
+os.environ["TAUCETI_REVIEW_ENGINE_REF"] = "dev"
+try:
+    agents._review_engine_source()
+except Exception as exc:
+    check("moving custom engine ref fails closed", "exact 40-hex" in str(exc))
+else:
+    check("moving custom engine ref fails closed", False)
+os.environ["TAUCETI_REVIEW_ENGINE_REF"] = engine_sha
 
 k = agents._kiro_review_model
 os.environ.pop("TAUCETI_REVIEW_KIRO_MODEL", None)
@@ -72,6 +108,7 @@ check("bubble: codex reviewer still seeds codex creds", captured["cred"] == "cod
 os.environ["TAUCETI_REVIEW_CODEX_MODEL"] = "gpt-5.6-terra"
 agents.review_in_bubble(w, 470, "abc123", "codex", opts)
 check("bubble: set -> --codex-model gpt-5.6-terra forwarded", "--codex-model gpt-5.6-terra" in captured["inner"])
+check("bubble: set -> --codex-effort high forwarded", "--codex-effort high" in captured["inner"])
 
 agents.review_in_bubble(w, 470, "abc123", "claude", opts)
 check("bubble: claude reviewer -> no codex flag even when set", "--codex-model" not in captured["inner"])
@@ -83,6 +120,9 @@ check("bubble: Kiro credential bootstrap is present", "kiro-auth.sqlite3" in cap
 
 os.environ.pop("TAUCETI_REVIEW_ENGINE_DIR", None)
 os.environ.pop("TAUCETI_REVIEW_CODEX_MODEL", None)
+os.environ.pop("TAUCETI_REVIEW_CODEX_EFFORT", None)
+os.environ.pop("TAUCETI_REVIEW_ENGINE_REPO", None)
+os.environ.pop("TAUCETI_REVIEW_ENGINE_REF", None)
 os.environ.pop("TAUCETI_AUTHORING_CODEX_MODEL", None)
 os.environ.pop("TAUCETI_REVIEW_KIRO_MODEL", None)
 os.environ.pop("TAUCETI_AUTHORING_KIRO_MODEL", None)

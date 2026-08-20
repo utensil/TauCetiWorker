@@ -18,8 +18,10 @@ from pathlib import Path
 
 from .agents import (
     AuthoringProfile,
+    _codex_review_effort_override,
     _codex_review_model_override,
     _kiro_review_model,
+    _review_engine_uvx_source,
     fetch_git_source,
     fetch_ref,
     fill_prompt,
@@ -589,12 +591,13 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
         else:
             logf = w.cfg.logdir / f"review-{pr}-{time.strftime('%Y%m%d-%H%M%S')}.log"
             cm = _codex_review_model_override(reviewers)  # operator override; else the engine default
+            ce = _codex_review_effort_override(reviewers)
             km = _kiro_review_model(reviewers)
             rc = run_to_logfile(
                 [
                     "uvx",
                     "--from",
-                    f"git+https://github.com/{REVIEW}",
+                    _review_engine_uvx_source(),
                     "tauceti-review",
                     str(pr),
                     "--store",
@@ -610,6 +613,7 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
                     "--submitted-by",
                     me(),
                     *(["--codex-model", cm] if cm else []),
+                    *(["--codex-effort", ce] if ce else []),
                     *(["--kiro-model", km] if km else []),
                 ],
                 logf,
@@ -729,7 +733,7 @@ def _sync_review_outbox(w: Worker, pr: int) -> int:
         argv = [
             "uvx",
             "--from",
-            f"git+https://github.com/{REVIEW}",
+            _review_engine_uvx_source(),
             "tauceti-review",
             str(pr),
             "--sync-only",
