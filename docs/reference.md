@@ -18,6 +18,8 @@ list is in `tauceti work -h`. For persistent workers, see
 | `--bubble` | Run code and review agents inside the Bubble sandbox instead of directly on the host. The outer survey and coordination, plus all progress-report rounds, remain on the host. |
 | `--host` | Deprecated no-op: the host is now the default. It only warns; pass `--bubble` for the sandbox. |
 | `--stream` | Stream the agent's log to the terminal instead of a file under `logs/`. |
+| `--review-roadmap AREA[,AREA...]` | Allow actionable review candidates from these roadmap areas. Repeatable; unioned with `--review-pr`. |
+| `--review-pr NUMBER[,NUMBER...]` | Allow these explicit actionable PRs. Repeatable; unioned with `--review-roadmap`. |
 | `--roadmap-only AREA` | The single roadmap area for roadmap rounds (empty = all areas). |
 | `--roadmap-skip AREA[,AREA...]` | Roadmap areas to exclude from selection (`--roadmap-only` wins on overlap). |
 | `--source PATH_OR_URL` | Supplementary local Git repository directory or Git repository URL (checked-out/default `HEAD`) for authoring a PR. A shallow snapshot is stored in worker state, refreshed on later rounds, and mounted read-only in Bubble mode. Requires the roadmap phase to be enabled and one specific `--roadmap-only AREA`; other enabled phases ignore it, and the roadmap and review quality remain authoritative. |
@@ -166,6 +168,8 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `TAUCETI_FORK` | auto-created | Point at an existing fork instead of the one the worker creates. |
 | `TAUCETI_ROADMAP_ONLY` | _(unset)_ | The single roadmap area for `--roadmap-only`. Unset = a fresh random area each round (falls back to all areas if the list can't be fetched); `""` = all areas. |
 | `TAUCETI_ROADMAP_SKIP` | _(unset)_ | Comma-separated roadmap areas to exclude, for `--roadmap-skip`. |
+| `TAUCETI_REVIEW_ROADMAPS` | _(unset)_ | Comma-separated roadmap areas allowed into the review queue. Unioned with `TAUCETI_REVIEW_PRS`; both unset preserves the unscoped queue. |
+| `TAUCETI_REVIEW_PRS` | _(unset)_ | Comma-separated explicit PR numbers allowed into the review queue. Unioned with `TAUCETI_REVIEW_ROADMAPS`. |
 | `TAUCETI_ROADMAP_EXTRA_IDENTITIES` | _(unset)_ | Comma-separated extra GitHub logins whose claimed intentions count as the worker's own. |
 | `TAUCETI_RESPECT_CLAIMS` | `true` | Whether roadmap workers avoid others' claimed intentions; `false` is the same as `--ignore-claims`. |
 | `TAUCETI_QUOTA_CMD` | — | Default for `--quota-cmd`. |

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
 
-from .config import Config, log, roadmap_only, roadmap_skip
+from .config import Config, log, review_prs, review_roadmaps, roadmap_only, roadmap_skip
 from .constants import (
     AUTO_STAGES,
     BUMP_HEAD_PREFIX,
@@ -188,6 +188,11 @@ class Survey:
     n_status_unlabeled: int = 0
     rebaseable: WorkKind = field(default_factory=lambda: WorkKind("rebase"))
     reviewable: WorkKind = field(default_factory=lambda: WorkKind("review"))
+    # Optional review-only allowlists. Empty+empty preserves the upstream unscoped queue. When either
+    # is non-empty, candidates are admitted by the UNION of exact PR numbers and roadmap areas.
+    review_scope_roadmaps: list[str] = field(default_factory=list)
+    review_scope_prs: list[int] = field(default_factory=list)
+    review_scope_excluded: list[Candidate] = field(default_factory=list)
     needs_fix: WorkKind = field(default_factory=lambda: WorkKind("fix"))
     red_ci: WorkKind = field(default_factory=lambda: WorkKind("fix-ci"))
     bump: WorkKind = field(default_factory=lambda: WorkKind("bump"))  # broken bump-mathlib PRs
@@ -328,6 +333,46 @@ def roadmap_open_count(prs: list[PRInfo], only: str, skip: list[str]) -> int:
 
     skipped = set(skip)
     return sum((areas := focuses(p)) is None or bool(areas - skipped) for p in prs)
+
+
+def pr_roadmap_areas(pr: PRInfo) -> set[str]:
+    """Authoritative roadmap areas for review scoping, with target-marker fallback during label lag.
+
+    A concrete ``roadmap/<area>`` label wins. ``roadmap/none`` and ``roadmap/Unknown`` do not match
+    any allowed area; an operator can still admit either PR explicitly with ``--review-pr``. Target
+    markers are used only while no roadmap label exists, without guessing from titles, paths, or prose.
+    """
+    labels = {label for label in pr.labels if label.startswith("roadmap/")}
+    concrete = labels - {"roadmap/", "roadmap/none", "roadmap/Unknown"}
+    if concrete:
+        return {label.removeprefix("roadmap/") for label in concrete}
+    if labels:
+        return set()
+    return set(pr.target_focuses)
+
+
+def scope_review_candidates(sv: Survey, roadmaps: list[str], prs: list[int]) -> None:
+    """Filter review candidates to the union of allowed roadmap areas and explicit PRs.
+
+    This only removes actionable review candidates. It cannot make an ineligible PR actionable, does
+    not touch another work stage, and preserves the upstream queue when both allowlists are empty.
+    """
+    sv.review_scope_roadmaps = list(roadmaps)
+    sv.review_scope_prs = list(prs)
+    if not roadmaps and not prs:
+        return
+    allowed_areas = {area.casefold() for area in roadmaps}
+    allowed_prs = set(prs)
+    info = {pr.number: pr for pr in sv.open_prs}
+    kept: list[Candidate] = []
+    for candidate in sv.reviewable.actionable:
+        pr = info.get(candidate.pr)
+        area_match = bool(pr and allowed_areas.intersection(area.casefold() for area in pr_roadmap_areas(pr)))
+        if candidate.pr in allowed_prs or area_match:
+            kept.append(candidate)
+        else:
+            sv.review_scope_excluded.append(candidate)
+    sv.reviewable.actionable = kept
 
 
 def spread_candidates(candidates: list, rng=random) -> list:
@@ -721,6 +766,7 @@ def survey(cfg: Config, gh: GitHub, rs: ReviewState, counters: Counters, *, deep
         c = Candidate(0, "", reason or "progress report")
         (sv.progress.actionable if due else sv.progress.suppressed).append(c)
 
+    scope_review_candidates(sv, review_roadmaps(), review_prs())
     sv.next_auto_stage = _next_auto_stage(sv)
     return sv
 

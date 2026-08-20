@@ -210,6 +210,13 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         raise NoProgress("gh pr list failed (GitHub API?) — aborting round, not falling through to authoring")
 
     log(f"open PRs: {sv.status_label_line()}")
+    if sv.review_scope_roadmaps or sv.review_scope_prs:
+        areas = ",".join(sv.review_scope_roadmaps) or "none"
+        prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"
+        log(
+            f"review scope: roadmaps={areas}; prs={prs}; "
+            f"excluded {len(sv.review_scope_excluded)} otherwise-actionable candidate(s)"
+        )
     for pr, providers in sv.review_inflight:
         log(f"  review #{pr}: a peer reviewer ({providers}) holds this head — skipping (no duplicate spend)")
     for pr, count in sv.review_capped:

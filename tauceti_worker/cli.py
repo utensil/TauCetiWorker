@@ -48,6 +48,8 @@ from .config import (
     auto_assign_wid,
     is_git_url,
     log,
+    review_prs,
+    review_roadmaps,
     roadmap_only,
     sanitize_wid,
     set_log_file,
@@ -88,6 +90,10 @@ examples:
   tauceti work                          one round: auto agent, on the host
   tauceti work --loop                   the driver: keep picking the best job
   tauceti work --loop --only review     a focused reviewer
+  tauceti work --loop --only review --review-roadmap RepresentationTheory
+                                        review only that roadmap's actionable PRs
+  tauceti work --loop --only review --review-roadmap RepresentationTheory --review-pr 3839,3859
+                                        union a roadmap scope with explicit PRs
   tauceti work --loop --skip roadmap    the whole cascade except authoring new PRs
   tauceti work --only roadmap --roadmap-only ReductiveGroups
   tauceti work --loop --roadmap-skip OneParameterSemigroups   leave that area to other workers
@@ -105,6 +111,8 @@ environment (flags win; full reference linked below):
   TAUCETI_WORKER_ID      pins the worker id (else `work` auto-assigns worker1, worker2, ...)
   TAUCETI_ROADMAP_ONLY   single roadmap area (unset = a fresh random area each round; "" = all areas)
   TAUCETI_ROADMAP_SKIP   comma-separated roadmap areas to exclude from selection
+  TAUCETI_REVIEW_ROADMAPS  comma-separated roadmap areas allowed for review
+  TAUCETI_REVIEW_PRS       comma-separated PR numbers allowed for review
   TAUCETI_QUOTA_CMD      default for --quota-cmd
   TAUCETI_PACE           pacing curve "t:b,..." (default = 60:40); see --pace
   TAUCETI_AUTHORING_CODEX_MODEL / _EFFORT   exact Codex authoring profile
@@ -118,8 +126,27 @@ environment (flags win; full reference linked below):
                          TauCeti its own Codex account without disturbing your interactive one
 
 full reference:
-  https://github.com/kim-em/TauCetiWorker/blob/main/docs/reference.md
+  https://github.com/utensil/TauCetiWorker/blob/dev/docs/reference.md
 """
+
+
+def add_review_scope_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--review-roadmap",
+        action="append",
+        default=None,
+        metavar="AREA[,AREA...]",
+        help="allow review candidates carrying any of these roadmap/<area> labels; repeatable and "
+        "comma-separated. Unioned with --review-pr. Omit both scope flags for the upstream unscoped queue",
+    )
+    p.add_argument(
+        "--review-pr",
+        action="append",
+        default=None,
+        metavar="NUMBER[,NUMBER...]",
+        help="allow these explicit PR numbers into the review queue; repeatable and comma-separated. "
+        "Unioned with --review-roadmap",
+    )
 
 
 def add_work_flags(p: argparse.ArgumentParser) -> None:
@@ -129,6 +156,7 @@ def add_work_flags(p: argparse.ArgumentParser) -> None:
         help="run the driver: keep doing rounds (pacing against quota between them) "
         "instead of the default single round",
     )
+    add_review_scope_flags(p)
     p.add_argument(
         "--only",
         action="append",
@@ -377,6 +405,27 @@ def resolve_review_throttle(cli_value: int | None, env: str, flag: str) -> int:
     return cli_value
 
 
+def install_review_scope(args) -> tuple[list[str], list[int]]:
+    """Install and validate review allowlists for this process and any loop children.
+
+    CLI values replace their corresponding environment value. An explicitly supplied but empty flag
+    is rejected: accepting it as "no scope" would widen a supposedly rationed reviewer to every
+    actionable PR.
+    """
+
+    def install(values, env: str, flag: str) -> None:
+        if values is None:
+            return
+        tokens = [token.strip() for value in values for token in value.split(",") if token.strip()]
+        if not tokens:
+            raise Die(f"{flag} must name at least one value")
+        os.environ[env] = ",".join(tokens)
+
+    install(getattr(args, "review_roadmap", None), "TAUCETI_REVIEW_ROADMAPS", "--review-roadmap")
+    install(getattr(args, "review_pr", None), "TAUCETI_REVIEW_PRS", "--review-pr")
+    return review_roadmaps(), review_prs()
+
+
 def resolve_agent(args) -> str:
     return getattr(args, "agent", None) or os.environ.get("TAUCETI_AGENT") or "auto"
 
@@ -436,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="read-only survey of available work + quota")
     s.add_argument("--json", action="store_true", help="emit the survey as JSON")
     s.add_argument("--worker-id", dest="worker_id", default=None)
+    add_review_scope_flags(s)
 
     u = sub.add_parser("usage", help="read Kiro/OpenRouter credits without sending a model prompt")
     u.add_argument(
@@ -633,6 +683,7 @@ def cmd_usage(args) -> int:
 
 
 def cmd_status(args) -> int:
+    install_review_scope(args)
     cfg = Config.resolve(getattr(args, "worker_id", None))
     gh = GitHub()
     rs = ReviewState(cfg, gh)
@@ -659,6 +710,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             "--host is now the default (the agent runs directly on the host); it is a no-op. "
             "Pass --bubble to run inside the sandbox instead"
         )
+    install_review_scope(args)
     author_model = getattr(args, "author_model", None)
     author_effort = getattr(args, "author_effort", None)
     resolved_author_fallback_model = getattr(args, "resolved_author_fallback_model", None)

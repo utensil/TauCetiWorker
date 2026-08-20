@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Merge kim-em/TauCetiWorker main into production dev, verify, and optionally push.
+# A conflict aborts back to the original clean state: a human/Kepler must resolve it before any review
+# round may use the fork. This script is intended to be the first gate before a new scoped review round.
+set -euo pipefail
+
+push=0
+case "${1:-}" in
+  "") ;;
+  --push) push=1 ;;
+  -h|--help)
+    echo "usage: scripts/sync-upstream [--push]"
+    exit 0
+    ;;
+  *)
+    echo "unknown argument: $1" >&2
+    exit 64
+    ;;
+esac
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "sync-upstream must run inside a Git checkout" >&2
+  exit 1
+}
+cd "$root"
+
+if [[ $(git branch --show-current) != dev ]]; then
+  echo "sync-upstream requires the production dev branch" >&2
+  exit 1
+fi
+if [[ -n $(git status --porcelain) ]]; then
+  echo "sync-upstream requires a clean worktree" >&2
+  exit 1
+fi
+if ! git remote get-url upstream >/dev/null 2>&1; then
+  git remote add upstream https://github.com/kim-em/TauCetiWorker.git
+fi
+
+git fetch upstream main
+before=$(git rev-parse HEAD)
+upstream_head=$(git rev-parse upstream/main)
+
+if git merge-base --is-ancestor "$upstream_head" HEAD; then
+  if [[ $push == 1 ]]; then
+    git push origin dev
+  fi
+  echo "dev already contains upstream/main at $upstream_head (dev $before)"
+  exit 0
+fi
+
+if ! git merge --no-commit --no-ff upstream/main; then
+  conflicts=$(git diff --name-only --diff-filter=U | paste -sd, -)
+  git merge --abort
+  echo "upstream merge conflicts require resolution before review: ${conflicts:-unknown files}" >&2
+  exit 2
+fi
+
+# Mirror the public CI gates before creating or pushing the merge commit. Failure aborts the tentative
+# merge, so a review launcher can never mistake an unverified integration for a usable fork head.
+if ! uvx ruff@0.15.18 check . \
+  || ! uvx ruff@0.15.18 format --check . \
+  || ! ./tests/run-all --fail-fast \
+  || ! git diff --check; then
+  git merge --abort
+  echo "upstream merge failed verification; restored fork head $before" >&2
+  exit 3
+fi
+
+git commit --no-edit
+after=$(git rev-parse HEAD)
+if [[ $push == 1 ]]; then
+  git push origin dev
+  echo "merged upstream/main into dev and pushed $after"
+else
+  echo "merged upstream/main into dev as $after (not pushed; rerun with --push after inspection)"
+fi

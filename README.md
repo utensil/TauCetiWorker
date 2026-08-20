@@ -120,9 +120,46 @@ drops kinds from the cascade (the two combine by subtraction):
 
 ```bash
 tauceti work --loop --only review     # only review open PRs
+tauceti work --loop --only review --review-roadmap RepresentationTheory
+tauceti work --loop --only review --review-roadmap RepresentationTheory --review-pr 3839,3859
 tauceti work --loop --only fix,fix-ci # only tend to our own PRs
 tauceti work --loop --skip roadmap    # everything except authoring new PRs
 ```
+
+Review loops can be rationed without replacing the Worker's normal survey, shuffle, claims, pacing,
+or one-round dispatch. `--review-roadmap <area>` and `--review-pr <number>` are repeatable and also
+accept comma-separated values. When either is present, an actionable review candidate is retained
+when its PR number is explicitly allowed **or** one of its `roadmap/<area>` labels is allowed. The two
+allowlists therefore form a union; candidates outside it are filtered before the Worker shuffles and
+selects. An explicit PR can admit an unlabelled or `roadmap/Unknown` candidate. Omit both flags to keep
+the upstream unscoped review queue.
+
+```bash
+# RepresentationTheory, plus two hand-picked exceptions from any roadmap:
+tauceti work --loop --only review \
+  --review-roadmap RepresentationTheory \
+  --review-pr 3839 --review-pr 3859
+
+# Preview the same scoped survey without launching a reviewer:
+tauceti status --review-roadmap RepresentationTheory --review-pr 3839 --json
+```
+
+The equivalent inherited settings are `TAUCETI_REVIEW_ROADMAPS` and `TAUCETI_REVIEW_PRS`.
+They are useful for managed workers and ensure every loop child receives the same frozen scope.
+
+### Keeping this scoped-review fork current
+
+Scoped-review production lives on `dev`. Before a new review round, run `scripts/sync-upstream --push`
+from a clean `dev` checkout. It fetches `kim-em/TauCetiWorker:main`, merges that upstream head into
+`dev`, runs the fork's lint and test gates, and pushes the verified production commit. It does not update
+this fork's `main`; that branch is maintained separately by its owner. A content conflict or failed gate
+aborts without changing the previous `dev` head; resolve the conflict and rerun before installing or
+launching that revision. Review launch policy should pin the resulting `dev` commit rather than install
+a moving branch.
+
+Routine upstream merges and their conflict resolutions may land directly on `dev` after local
+verification. Any new fork feature must be developed on a separate feature branch and enter `dev`
+through a human-approved pull request.
 
 Roadmap rounds steer toward one area, a subdirectory of the
 [roadmap](https://github.com/TauCetiProject/TauCetiRoadmap):
