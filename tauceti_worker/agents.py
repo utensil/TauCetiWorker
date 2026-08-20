@@ -491,11 +491,12 @@ def prepare_checkout(cfg: Config) -> bool:
     return True
 
 
-def _fetch_shallow(url: str, dir: Path) -> bool:
+def _fetch_shallow(url: str, dir: Path, ref: str = "HEAD") -> bool:
     """Clone or refresh a worker-owned shallow checkout and make its origin fetch-only."""
     if (dir / ".git").is_dir():
         ok = (
-            subprocess.run(["git", "-C", str(dir), "fetch", "-q", "--depth", "1", "origin", "HEAD"]).returncode == 0
+            subprocess.run(["git", "-C", str(dir), "remote", "set-url", "origin", url]).returncode == 0
+            and subprocess.run(["git", "-C", str(dir), "fetch", "-q", "--depth", "1", "origin", ref]).returncode == 0
             and subprocess.run(["git", "-C", str(dir), "reset", "-q", "--hard", "FETCH_HEAD"]).returncode == 0
         )
         clean = subprocess.run(["git", "-C", str(dir), "clean", "-fdxq"]).returncode == 0
@@ -505,15 +506,24 @@ def _fetch_shallow(url: str, dir: Path) -> bool:
 
     shutil.rmtree(dir, ignore_errors=True)
     dir.parent.mkdir(parents=True, exist_ok=True)
-    cloned = subprocess.run(["git", "clone", "-q", "--depth", "1", "--", url, str(dir)]).returncode == 0
+    if ref == "HEAD":
+        cloned = subprocess.run(["git", "clone", "-q", "--depth", "1", "--", url, str(dir)]).returncode == 0
+    else:
+        dir.mkdir(parents=True, exist_ok=True)
+        cloned = (
+            subprocess.run(["git", "-C", str(dir), "init", "-q"]).returncode == 0
+            and subprocess.run(["git", "-C", str(dir), "remote", "add", "origin", url]).returncode == 0
+            and subprocess.run(["git", "-C", str(dir), "fetch", "-q", "--depth", "1", "origin", ref]).returncode == 0
+            and subprocess.run(["git", "-C", str(dir), "checkout", "-q", "--detach", "FETCH_HEAD"]).returncode == 0
+        )
     return (
         cloned and subprocess.run(["git", "-C", str(dir), "config", "remote.origin.pushurl", "no_push"]).returncode == 0
     )
 
 
-def fetch_ref(repo: str, dir: Path) -> bool:
-    """Worker-owned throwaway shallow mirror of repo's default branch (reset hard, clean)."""
-    return _fetch_shallow(f"https://github.com/{repo}", dir)
+def fetch_ref(repo: str, dir: Path, ref: str = "HEAD") -> bool:
+    """Worker-owned throwaway shallow mirror of a default branch or exact ref."""
+    return _fetch_shallow(f"https://github.com/{repo}", dir, ref)
 
 
 def fetch_git_source(url: str, dir: Path) -> bool:
@@ -1428,6 +1438,39 @@ def _codex_review_model_override(reviewers: str) -> str | None:
     return m if (m and "codex" in [r.strip() for r in reviewers.split(",")]) else None
 
 
+_CODEX_REVIEW_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+_REVIEW_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _codex_review_effort_override(reviewers: str) -> str | None:
+    """Independent explicit Codex review effort, or None for engine policy."""
+    effort = (os.environ.get("TAUCETI_REVIEW_CODEX_EFFORT") or "").strip().lower()
+    if not effort or "codex" not in [r.strip() for r in reviewers.split(",")]:
+        return None
+    if effort not in _CODEX_REVIEW_EFFORTS:
+        raise Die("TAUCETI_REVIEW_CODEX_EFFORT must be one of " + ", ".join(sorted(_CODEX_REVIEW_EFFORTS)))
+    return effort
+
+
+def _review_engine_source() -> tuple[str, str]:
+    """Review engine repository and immutable ref selected by operator policy."""
+    repo = (os.environ.get("TAUCETI_REVIEW_ENGINE_REPO") or REVIEW).strip()
+    ref = (os.environ.get("TAUCETI_REVIEW_ENGINE_REF") or "").strip().lower()
+    if not _REVIEW_REPO_RE.fullmatch(repo):
+        raise Die(f"invalid TAUCETI_REVIEW_ENGINE_REPO: {repo!r}")
+    if ref and not re.fullmatch(r"[0-9a-f]{40}", ref):
+        raise Die("TAUCETI_REVIEW_ENGINE_REF must be an exact 40-hex commit")
+    if repo != REVIEW and not ref:
+        raise Die("a custom TAUCETI_REVIEW_ENGINE_REPO requires an exact TAUCETI_REVIEW_ENGINE_REF")
+    return repo, ref
+
+
+def _review_engine_uvx_source() -> str:
+    repo, ref = _review_engine_source()
+    suffix = f"@{ref}" if ref else ""
+    return f"git+https://github.com/{repo}.git{suffix}"
+
+
 def _kiro_review_model(reviewers: str) -> str | None:
     """Exact Kiro review model, independent of authoring model policy."""
     if "kiro" not in [r.strip() for r in reviewers.split(",")]:
@@ -1457,8 +1500,9 @@ def review_in_bubble(w: Worker, pr: int, head: str, reviewers: str, opts: RoundO
     cfg = w.cfg
     eng = os.environ.get("TAUCETI_REVIEW_ENGINE_DIR")
     engine_dir = Path(eng) if eng else (cfg.state / "refs" / "review-engine")
-    if not eng and not fetch_ref(REVIEW, engine_dir):  # keeps .git (no cross-repo rev fallback)
-        raise Die(f"fetch {REVIEW} failed")
+    engine_repo, engine_ref = _review_engine_source()
+    if not eng and not fetch_ref(engine_repo, engine_dir, engine_ref or "HEAD"):  # keeps .git
+        raise Die(f"fetch {engine_repo}{'@' + engine_ref if engine_ref else ''} failed")
     roadmap_dir = cfg.state / "refs" / "roadmap"
     if not fetch_ref(ROADMAP, roadmap_dir):
         raise Die(f"fetch {ROADMAP} failed")
@@ -1474,6 +1518,8 @@ def review_in_bubble(w: Worker, pr: int, head: str, reviewers: str, opts: RoundO
 
     cm = _codex_review_model_override(reviewers)
     codex_flag = f" --codex-model {shlex.quote(cm)}" if cm else ""  # operator override; else engine default
+    ce = _codex_review_effort_override(reviewers)
+    codex_effort_flag = f" --codex-effort {shlex.quote(ce)}" if ce else ""
     km = _kiro_review_model(reviewers)
     kiro_flag = f" --kiro-model {shlex.quote(km)}" if km else ""
     inner = (
@@ -1481,7 +1527,8 @@ def review_in_bubble(w: Worker, pr: int, head: str, reviewers: str, opts: RoundO
         f"{pr} --repo {TAUCETI} --repo-dir /opt/engine --roadmap-dir /opt/roadmap "
         f"--no-mathlib --no-sync --store /opt/review-store --post "
         f"--max-rounds-per-day {REVIEW_DAILY_CAP} "  # one value drives the survey prefilter + engine
-        f"--reviewer {reviewers} --expect-head {head} --submitted-by {me()}{codex_flag}{kiro_flag}"
+        f"--reviewer {reviewers} --expect-head {head} --submitted-by {me()}"
+        f"{codex_flag}{codex_effort_flag}{kiro_flag}"
     )
     if km:
         # The review engine creates another clean reviewer HOME. Seed this

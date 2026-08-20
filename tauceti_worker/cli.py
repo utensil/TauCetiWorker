@@ -114,6 +114,8 @@ environment (flags win; full reference linked below):
   TAUCETI_PACE           pacing curve "t:b,..." (default = 60:40); see --pace
   TAUCETI_AUTHORING_CODEX_MODEL / _EFFORT   exact Codex authoring profile
   TAUCETI_AUTHORING_CLAUDE_MODEL / _EFFORT exact Claude authoring profile
+  TAUCETI_REVIEW_CODEX_MODEL / _EFFORT     exact Codex review profile
+  TAUCETI_REVIEW_ENGINE_REPO / _REF        review engine source; custom repo needs exact SHA
   TAUCETI_STREAM=1       same as --stream
   TAUCETI_AUTO_REFRESH=1 same as --auto-refresh (renew an expired Claude token; see --auto-refresh)
   TAUCETI_ACCOUNT        default for --account (require a specific Codex account)
