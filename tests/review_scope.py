@@ -47,6 +47,7 @@ def scoped(roadmaps=(), prs=()):
         pr(4, focuses=("RepresentationTheory",)),
         pr(5, "roadmap/none"),
         pr(6, "roadmap/RepresentationTheory", "roadmap/ReductiveGroups"),
+        pr(7, "roadmap/unknown", focuses=("RepresentationTheory",)),
     ]
     sv.reviewable.actionable = [tc.Candidate(item.number, item.head_oid) for item in sv.open_prs]
     sv.needs_fix.actionable = [tc.Candidate(99, "fix-head")]
@@ -54,7 +55,7 @@ def scoped(roadmaps=(), prs=()):
     return sv
 
 
-check("no scope preserves upstream queue", [c.pr for c in scoped().reviewable.actionable], [1, 2, 3, 4, 5, 6])
+check("no scope preserves upstream queue", [c.pr for c in scoped().reviewable.actionable], [1, 2, 3, 4, 5, 6, 7])
 check(
     "roadmap scope admits labelled and marker-fallback PRs",
     [c.pr for c in scoped(["representationtheory"]).reviewable.actionable],
@@ -65,6 +66,11 @@ check(
     [c.pr for c in scoped(["RepresentationTheory"]).reviewable.actionable],
     [1, 4, 6],
 )
+check(
+    "roadmap/unknown fails closed case-insensitively",
+    [c.pr for c in scoped(["RepresentationTheory"]).reviewable.actionable],
+    [1, 4, 6],
+)
 check("explicit PR list admits exact numbers", [c.pr for c in scoped(prs=[2, 3, 5]).reviewable.actionable], [2, 3, 5])
 check(
     "roadmap and PR filters form a union",
@@ -72,7 +78,7 @@ check(
     [1, 2, 4, 5, 6],
 )
 sv = scoped(["RepresentationTheory"], [2])
-check("excluded candidates are observable", [c.pr for c in sv.review_scope_excluded], [3, 5])
+check("excluded candidates are observable", [c.pr for c in sv.review_scope_excluded], [3, 5, 7])
 check("another work stage is untouched", [c.pr for c in sv.needs_fix.actionable], [99])
 
 saved = {name: os.environ.get(name) for name in ("TAUCETI_REVIEW_ROADMAPS", "TAUCETI_REVIEW_PRS")}
@@ -102,6 +108,12 @@ try:
         "roadmap environment installed", os.environ["TAUCETI_REVIEW_ROADMAPS"], "RepresentationTheory,ReductiveGroups"
     )
     check("PR environment installed", os.environ["TAUCETI_REVIEW_PRS"], "3809,3871,3827")
+
+    os.environ["TAUCETI_REVIEW_ROADMAPS"] = "HiddenRoadmap"
+    os.environ["TAUCETI_REVIEW_PRS"] = "999"
+    exact_cli = tc.install_review_scope(SimpleNamespace(review_roadmap=["RepresentationTheory"], review_pr=None))
+    check("any CLI scope replaces the complete ambient scope", exact_cli, (["RepresentationTheory"], []))
+    check("omitted CLI counterpart is cleared", "TAUCETI_REVIEW_PRS" in os.environ, False)
 
     os.environ["TAUCETI_REVIEW_PRS"] = "9,nope"
     try:

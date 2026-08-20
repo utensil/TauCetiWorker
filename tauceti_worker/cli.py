@@ -413,16 +413,22 @@ def install_review_scope(args) -> tuple[list[str], list[int]]:
     actionable PR.
     """
 
+    roadmap_values = getattr(args, "review_roadmap", None)
+    pr_values = getattr(args, "review_pr", None)
+    cli_scope = roadmap_values is not None or pr_values is not None
+
     def install(values, env: str, flag: str) -> None:
         if values is None:
+            if cli_scope:
+                os.environ.pop(env, None)
             return
         tokens = [token.strip() for value in values for token in value.split(",") if token.strip()]
         if not tokens:
             raise Die(f"{flag} must name at least one value")
         os.environ[env] = ",".join(tokens)
 
-    install(getattr(args, "review_roadmap", None), "TAUCETI_REVIEW_ROADMAPS", "--review-roadmap")
-    install(getattr(args, "review_pr", None), "TAUCETI_REVIEW_PRS", "--review-pr")
+    install(roadmap_values, "TAUCETI_REVIEW_ROADMAPS", "--review-roadmap")
+    install(pr_values, "TAUCETI_REVIEW_PRS", "--review-pr")
     return review_roadmaps(), review_prs()
 
 

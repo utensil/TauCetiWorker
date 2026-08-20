@@ -145,7 +145,9 @@ tauceti status --review-roadmap RepresentationTheory --review-pr 3839 --json
 ```
 
 The equivalent inherited settings are `TAUCETI_REVIEW_ROADMAPS` and `TAUCETI_REVIEW_PRS`.
-They are useful for managed workers and ensure every loop child receives the same frozen scope.
+They are useful for managed workers and ensure every loop child receives the same frozen scope. If
+either CLI scope flag is supplied, the CLI values define the complete scope and any omitted
+counterpart is cleared rather than inherited, preventing an ambient setting from widening a command.
 
 ### Keeping this scoped-review fork current
 

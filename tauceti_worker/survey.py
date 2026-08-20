@@ -342,10 +342,10 @@ def pr_roadmap_areas(pr: PRInfo) -> set[str]:
     any allowed area; an operator can still admit either PR explicitly with ``--review-pr``. Target
     markers are used only while no roadmap label exists, without guessing from titles, paths, or prose.
     """
-    labels = {label for label in pr.labels if label.startswith("roadmap/")}
-    concrete = labels - {"roadmap/", "roadmap/none", "roadmap/Unknown"}
+    labels = {label for label in pr.labels if label.casefold().startswith("roadmap/")}
+    concrete = {label for label in labels if label.split("/", 1)[1].casefold() not in {"", "none", "unknown"}}
     if concrete:
-        return {label.removeprefix("roadmap/") for label in concrete}
+        return {label.split("/", 1)[1] for label in concrete}
     if labels:
         return set()
     return set(pr.target_focuses)
