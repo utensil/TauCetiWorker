@@ -49,6 +49,8 @@ _WORKER_KEYS = {
     "roadmap_only",
     "roadmap_skip",
     "roadmap_extra_identities",
+    "review_roadmap",
+    "review_pr",
     "respect_claims",
     "source",
     "author_model",
@@ -204,6 +206,7 @@ _RESERVED_ENV = frozenset(
 # A POSIX-portable variable name, which is also what a shell can refer to. `execve` accepts more, but
 # a name like `1A` or `A-B` can only be reached by contortion, so it is far likelier to be a typo.
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_REVIEW_ROADMAP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 # Aggregate cap on one worker's table. The spec reaches the runner as a single command-line argument,
 # so an unbounded table becomes E2BIG at launch; refuse it while it is still a configuration error the
@@ -238,6 +241,25 @@ def _env_pairs(value, where: str) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(pairs))
 
 
+def _review_roadmaps(value, where: str) -> tuple[str, ...]:
+    values = _strings(value, where)
+    bad = next((item for item in values if not _REVIEW_ROADMAP.fullmatch(item)), None)
+    if bad is not None:
+        raise WorkersError(f"{where} contains an invalid roadmap area: {bad!r}")
+    return tuple(sorted(set(values), key=str.casefold))
+
+
+def _review_prs(value, where: str) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        raise WorkersError(f"{where} must be an array of positive integers")
+    values: set[int] = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            raise WorkersError(f"{where} must contain only positive integers")
+        values.add(item)
+    return tuple(sorted(values))
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkerSpec:
     id: str
@@ -250,6 +272,8 @@ class WorkerSpec:
     roadmap_only: str | None = None
     roadmap_skip: tuple[str, ...] = ()
     roadmap_extra_identities: tuple[str, ...] = ()
+    review_roadmap: tuple[str, ...] = ()
+    review_pr: tuple[int, ...] = ()
     respect_claims: bool = True
     source: str | None = None
     author_model: str | None = None
@@ -300,6 +324,8 @@ class WorkerSpec:
             roadmap_extra_identities=_strings(
                 raw.get("roadmap_extra_identities", []), f"workers[{index}].roadmap_extra_identities"
             ),
+            review_roadmap=_review_roadmaps(raw.get("review_roadmap", []), f"workers[{index}].review_roadmap"),
+            review_pr=_review_prs(raw.get("review_pr", []), f"workers[{index}].review_pr"),
             respect_claims=_boolean(raw.get("respect_claims", True), f"workers[{index}].respect_claims"),
             source=_string(raw.get("source"), f"workers[{index}].source", optional=True),
             author_model=_string(raw.get("author_model"), f"workers[{index}].author_model", optional=True),
@@ -334,6 +360,10 @@ class WorkerSpec:
             value["roadmap_skip"] = list(self.roadmap_skip)
         if self.roadmap_extra_identities:
             value["roadmap_extra_identities"] = list(self.roadmap_extra_identities)
+        if self.review_roadmap:
+            value["review_roadmap"] = list(self.review_roadmap)
+        if self.review_pr:
+            value["review_pr"] = list(self.review_pr)
         if not self.respect_claims:
             value["respect_claims"] = False
         for name in ("source", "author_model", "author_effort", "pace"):
@@ -374,6 +404,10 @@ class WorkerSpec:
             argv += ["--roadmap-skip", ",".join(self.roadmap_skip)]
         if self.roadmap_extra_identities:
             argv += ["--roadmap-extra-identities", ",".join(self.roadmap_extra_identities)]
+        if self.review_roadmap:
+            argv += ["--review-roadmap", ",".join(self.review_roadmap)]
+        if self.review_pr:
+            argv += ["--review-pr", ",".join(str(pr) for pr in self.review_pr)]
         if not self.respect_claims:
             argv.append("--ignore-claims")
         for field, flag in (
@@ -1632,6 +1666,8 @@ def parse_legacy_config(path: Path) -> list[WorkerSpec]:
                 "--roadmap-only": "roadmap_only",
                 "--roadmap-skip": "roadmap_skip",
                 "--roadmap-extra-identities": "roadmap_extra_identities",
+                "--review-roadmap": "review_roadmap",
+                "--review-pr": "review_pr",
                 "--source": "source",
                 "--author-model": "author_model",
                 "--author-effort": "author_effort",
@@ -1639,7 +1675,22 @@ def parse_legacy_config(path: Path) -> list[WorkerSpec]:
             }.get(token)
             if key is None:
                 raise WorkersError(f"{path}:{number}: unsupported legacy argument {token}")
-            values[key] = value.split(",") if key in ("only", "roadmap_skip", "roadmap_extra_identities") else value
+            if key in ("only", "roadmap_skip", "roadmap_extra_identities", "review_roadmap"):
+                items = value.split(",")
+                if key == "review_roadmap":
+                    values.setdefault(key, []).extend(items)
+                else:
+                    values[key] = items
+            elif key == "review_pr":
+                parsed: list[int] = []
+                for item in value.split(","):
+                    try:
+                        parsed.append(int(item))
+                    except ValueError:
+                        raise WorkersError(f"{path}:{number}: --review-pr contains an invalid PR: {item!r}") from None
+                values.setdefault(key, []).extend(parsed)
+            else:
+                values[key] = value
         if not values.get("id"):
             raise WorkersError(f"{path}:{number}: persistent workers need an explicit --worker-id")
         if values.pop("bubble", False):

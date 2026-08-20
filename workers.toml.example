@@ -18,3 +18,11 @@ enabled = true
 only = ["roadmap", "fix", "fix-ci"]
 roadmap_only = "RepresentationTheory"
 source = "https://github.com/FormalFrontier/Etingof-RepresentationTheory-draft1"
+
+[[workers]]
+id = "reviewer"
+enabled = true
+agent = "codex"
+only = ["review"]
+review_roadmap = ["RepresentationTheory"]
+review_pr = [3809, 3847]

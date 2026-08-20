@@ -98,13 +98,17 @@ try:
     # Legacy command import produces the same semantic settings without retaining shell syntax.
     legacy = root / "workers.conf"
     legacy.write_text(
-        "./tauceti work --loop --worker-id worker2 --agent codex --only rebase,review --ignore-quota --auto-refresh\n"
+        "./tauceti work --loop --worker-id worker2 --agent codex --only rebase,review "
+        "--review-roadmap RepresentationTheory --review-pr 3809 --review-pr 3847,3871 "
+        "--ignore-quota --auto-refresh\n"
     )
     imported = wm.parse_legacy_config(legacy)
     assert imported[0].id == "worker2"
     assert imported[0].only == ("rebase", "review")
     assert imported[0].ignore_quota is True
     assert imported[0].auto_refresh is True
+    assert imported[0].review_roadmap == ("RepresentationTheory",)
+    assert imported[0].review_pr == (3809, 3847, 3871)
 
     # The full semantic model must remain parseable by the real work CLI.
     maximal = wm.WorkerSpec(
@@ -117,6 +121,8 @@ try:
         roadmap_only="RepresentationTheory",
         roadmap_skip=("Algebra",),
         roadmap_extra_identities=("Maintainer",),
+        review_roadmap=("ReductiveGroups", "RepresentationTheory"),
+        review_pr=(3809, 3847, 3871),
         respect_claims=False,
         source="https://example.invalid/source",
         author_model="gpt-5",
@@ -128,11 +134,43 @@ try:
     parsed = build_parser().parse_args(maximal.work_argv()[3:])
     assert parsed.cmd == "work" and parsed.worker_id == "maximal"
     assert parsed.auto_refresh is True
+    assert parsed.review_roadmap == ["ReductiveGroups,RepresentationTheory"]
+    assert parsed.review_pr == ["3809,3847,3871"]
     # A worker that has NOT opted in must not emit the flag: the default is to leave the operator's
     # single-use refresh token alone.
     assert "--auto-refresh" not in wm.WorkerSpec(id="plain").work_argv()
     assert wm.WorkerSpec.from_dict({"id": "plain"}, 0).auto_refresh is False
     assert wm.WorkerSpec.from_dict({"id": "opted", "auto_refresh": True}, 0).as_dict()["auto_refresh"] is True
+
+    # The private launcher config normalizes review scope, then passes it to the Worker only through
+    # explicit CLI flags. It never becomes an environment setting or mutable round state.
+    scoped = wm.WorkerSpec.from_dict(
+        {
+            "id": "reviewer",
+            "only": ["review"],
+            "review_roadmap": ["RepresentationTheory", "ReductiveGroups", "RepresentationTheory"],
+            "review_pr": [3871, 3809, 3871],
+        },
+        0,
+    )
+    assert scoped.review_roadmap == ("ReductiveGroups", "RepresentationTheory")
+    assert scoped.review_pr == (3809, 3871)
+    assert scoped.as_dict()["review_pr"] == [3809, 3871]
+    assert "--review-roadmap" in scoped.work_argv() and "--review-pr" in scoped.work_argv()
+    assert not any(name.startswith(("TAUCETI_REVIEW_ROADMAP", "TAUCETI_REVIEW_PR")) for name, _ in scoped.env)
+    for bad, why in (
+        ({"review_roadmap": ["Representation Theory"]}, "invalid roadmap area"),
+        ({"review_roadmap": "RepresentationTheory"}, "non-array roadmap scope"),
+        ({"review_pr": [0]}, "zero PR"),
+        ({"review_pr": [-1]}, "negative PR"),
+        ({"review_pr": ["3809"]}, "string PR"),
+        ({"review_pr": [True]}, "boolean PR"),
+    ):
+        try:
+            wm.WorkerSpec.from_dict({"id": "reviewer", **bad}, 0)
+            raise AssertionError(f"{why} should have been rejected: {bad}")
+        except wm.WorkersError:
+            pass
 
     # --- per-worker environment ---------------------------------------------------------------
     # It reaches the worker's process tree (so a build setting can be A/B'd on one worker), survives
