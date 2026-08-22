@@ -217,11 +217,14 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         deep=True,
         review_scope_roadmaps=getattr(opts, "review_scope_roadmaps", ()),
         review_scope_prs=getattr(opts, "review_scope_prs", ()),
+        scoped_review_only=set(opts.only) == {"review"},
     )
     if sv.github_failed:
-        raise NoProgress("gh pr list failed (GitHub API?) — aborting round, not falling through to authoring")
+        detail = " ".join((sv.errors[0] if sv.errors else "GitHub survey failed").split())[:500]
+        raise NoProgress(f"{detail} — aborting round, not falling through to authoring")
 
-    log(f"open PRs: {sv.status_label_line()}")
+    label = "scoped open PRs" if sv.review_query_scoped else "open PRs"
+    log(f"{label}: {sv.status_label_line()}")
     if sv.review_scope_roadmaps or sv.review_scope_prs:
         areas = ",".join(sv.review_scope_roadmaps) or "none"
         prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"
@@ -229,6 +232,8 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
             f"review scope: roadmaps={areas}; prs={prs}; "
             f"excluded {len(sv.review_scope_excluded)} otherwise-actionable candidate(s)"
         )
+        if sv.review_query_scoped:
+            log(f"review query: {sv.review_query_strategy} (hydrated {len(sv.open_prs)} open scoped PR(s))")
     for pr, providers in sv.review_inflight:
         log(f"  review #{pr}: a peer reviewer ({providers}) holds this head — skipping (no duplicate spend)")
     for pr, count in sv.review_capped:

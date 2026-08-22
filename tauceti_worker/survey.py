@@ -78,6 +78,23 @@ TARGET_MARKER_RE = re.compile(r"<!--tauceti-target:v1 (\{[^}]*\})-->")
 
 TARGET_ID_RE = re.compile(r'"id"\s*:\s*"([^"]+)"')
 
+PR_QUERY_FIELDS = (
+    "number",
+    "title",
+    "body",
+    "headRefOid",
+    "headRefName",
+    "headRepositoryOwner",
+    "headRepository",
+    "isDraft",
+    "statusCheckRollup",
+    "author",
+    "mergeable",
+    "labels",
+)
+
+PR_SCOPE_INDEX_FIELDS = ("number", "body", "labels")
+
 
 def target_marker_focuses(body: str) -> tuple[str, ...]:
     """Concrete roadmap focuses in target markers; all/auto are scopes, not roadmap area names."""
@@ -193,6 +210,8 @@ class Survey:
     review_scope_roadmaps: list[str] = field(default_factory=list)
     review_scope_prs: list[int] = field(default_factory=list)
     review_scope_excluded: list[Candidate] = field(default_factory=list)
+    review_query_scoped: bool = False
+    review_query_strategy: str = "full"
     needs_fix: WorkKind = field(default_factory=lambda: WorkKind("fix"))
     red_ci: WorkKind = field(default_factory=lambda: WorkKind("fix-ci"))
     bump: WorkKind = field(default_factory=lambda: WorkKind("bump"))  # broken bump-mathlib PRs
@@ -375,6 +394,35 @@ def scope_review_candidates(sv: Survey, roadmaps: list[str], prs: list[int]) -> 
     sv.reviewable.actionable = kept
 
 
+def scoped_review_pr_json(gh: GitHub, roadmaps: list[str], prs: list[int]) -> list[dict]:
+    """Load only human-scoped PRs for a review-only round.
+
+    Explicit PR scopes never enumerate the repository. Roadmap scopes first read a lightweight open-PR
+    index (body is needed only for the existing target-marker fallback), then hydrate the matching union
+    one PR at a time. Hydration repeats labels/body and the final candidate filter rechecks the scope, so
+    a label or marker that changes between discovery and hydration cannot widen the approved set.
+
+    Every requested view is strict: a network/GraphQL failure aborts the survey instead of silently
+    turning an approved PR into "not present". Closed and merged PRs are ordinary, successful reads and
+    are excluded by their returned state.
+    """
+    allowed = set(prs)
+    if roadmaps:
+        areas = {area.casefold() for area in roadmaps}
+        for item in gh.pr_list(list(PR_SCOPE_INDEX_FIELDS)):
+            info = PRInfo.from_json(item)
+            if areas.intersection(area.casefold() for area in pr_roadmap_areas(info)):
+                allowed.add(info.number)
+
+    out: list[dict] = []
+    fields = [*PR_QUERY_FIELDS, "state"]
+    for pr in sorted(allowed):
+        item = gh.pr_view_required(pr, fields)
+        if str(item.get("state") or "").upper() == "OPEN":
+            out.append(item)
+    return out
+
+
 def spread_candidates(candidates: list, rng=random) -> list:
     """Return a stage's candidates in a randomized order so several workers starting together don't all
     converge on the same (lowest-numbered) PR and collide. The survey has already dropped work a peer is
@@ -543,6 +591,7 @@ def survey(
     deep: bool = True,
     review_scope_roadmaps: list[str] | tuple[str, ...] = (),
     review_scope_prs: list[int] | tuple[int, ...] = (),
+    scoped_review_only: bool = False,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
@@ -554,27 +603,29 @@ def survey(
     # "any" = all areas, else the chosen area. The concrete random area is resolved later, in
     # do_roadmap (once per authoring round) — not here, since survey() re-runs read-only for status
     # and every ~90s in the dashboard, which would re-roll and flicker the displayed area.
+    scope_roadmaps = list(review_scope_roadmaps)
+    scope_prs = list(review_scope_prs)
+    use_scoped_query = scoped_review_only and bool(scope_roadmaps or scope_prs)
     sv = Survey(
         worker_id=cfg.wid,
         roadmap_only=("auto" if _f is None else (_f or "any")),
         roadmap_skip=roadmap_skip(),
+        review_scope_roadmaps=scope_roadmaps,
+        review_scope_prs=scope_prs,
+        review_query_scoped=use_scoped_query,
+        review_query_strategy=(
+            "explicit-pr"
+            if use_scoped_query and not scope_roadmaps
+            else "roadmap-union"
+            if use_scoped_query
+            else "full"
+        ),
     )
     try:
-        raw = gh.pr_list(
-            [
-                "number",
-                "title",
-                "body",
-                "headRefOid",
-                "headRefName",
-                "headRepositoryOwner",
-                "headRepository",
-                "isDraft",
-                "statusCheckRollup",
-                "author",
-                "mergeable",
-                "labels",
-            ]
+        raw = (
+            scoped_review_pr_json(gh, scope_roadmaps, scope_prs)
+            if use_scoped_query
+            else gh.pr_list(list(PR_QUERY_FIELDS))
         )
     except GitHubError as e:
         sv.github_failed = True
@@ -775,7 +826,7 @@ def survey(
         c = Candidate(0, "", reason or "progress report")
         (sv.progress.actionable if due else sv.progress.suppressed).append(c)
 
-    scope_review_candidates(sv, list(review_scope_roadmaps), list(review_scope_prs))
+    scope_review_candidates(sv, scope_roadmaps, scope_prs)
     sv.next_auto_stage = _next_auto_stage(sv)
     return sv
 
