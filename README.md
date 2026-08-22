@@ -126,13 +126,19 @@ tauceti work --loop --only fix,fix-ci # only tend to our own PRs
 tauceti work --loop --skip roadmap    # everything except authoring new PRs
 ```
 
-Review loops can be rationed without replacing the Worker's normal survey, shuffle, claims, pacing,
-or one-round dispatch. `--review-roadmap <area>` and `--review-pr <number>` are repeatable and also
-accept comma-separated values. When either is present, an actionable review candidate is retained
+Review loops can be rationed without replacing the Worker's normal eligibility, shuffle, claims,
+pacing, or one-round dispatch. `--review-roadmap <area>` and `--review-pr <number>` are repeatable and
+also accept comma-separated values. When either is present, an actionable review candidate is retained
 when its PR number is explicitly allowed **or** one of its `roadmap/<area>` labels is allowed. The two
 allowlists therefore form a union; candidates outside it are filtered before the Worker shuffles and
 selects. An explicit PR can admit an unlabelled or `roadmap/Unknown` candidate. Omit both flags to keep
 the upstream unscoped review queue.
+
+A review-only work round also scopes its GitHub reads. An explicit-PR scope views only those PR numbers;
+a roadmap scope first reads a lightweight open-PR roadmap index and then hydrates only its matches plus
+explicit exceptions. Each hydrated PR is rechecked as open and the final scope filter runs again before
+selection. Unscoped, status/dashboard, and multi-stage surveys retain the full upstream survey because
+their other work kinds need repository-wide state.
 
 ```bash
 # RepresentationTheory, plus two hand-picked exceptions from any roadmap:

@@ -22,6 +22,13 @@ from .constants import (
     TAUCETI,
 )
 
+_GH_TRANSIENT_RE = re.compile(
+    r"unexpected (?:EOF|end of JSON input)|stream error:|connection reset by peer|"
+    r"TLS handshake timeout|HTTP 5(?:00|02|03|04)\b",
+    re.I,
+)
+_GH_TRANSIENT_RETRIES = 2
+
 
 @functools.lru_cache(maxsize=1)
 def me() -> str:
@@ -275,14 +282,22 @@ def _gh_retry_after(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def gh_run(argv: list[str], *, cwd: Path | None = None, max_wait: int = GH_INROUND_WAIT) -> subprocess.CompletedProcess:
+def gh_run(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    max_wait: int = GH_INROUND_WAIT,
+    retry_transient: bool = False,
+) -> subprocess.CompletedProcess:
     """Run a `gh` command, waiting out a SECONDARY GitHub rate limit IN PLACE and retrying so the limit
     costs a pause, not a discarded round (bounded by max_wait so it can't blow ROUND_TIMEOUT). A PRIMARY
     (hourly) limit is surfaced immediately — waiting an hour inside a round under the 90-min cap would
     just be SIGKILLed; the loop preflight waits that reset out instead. Any non-rate-limit failure is
-    returned unchanged for the caller to handle as before."""
+    returned unchanged for the caller to handle as before. Transport/server retries are opt-in because
+    retrying a mutating request after an ambiguous disconnect could duplicate the mutation."""
     waited = 0
-    attempt = 0
+    secondary_attempt = 0
+    transient_attempt = 0
     while True:
         p = run(argv, cwd=cwd)
         if p.returncode == 0:
@@ -290,6 +305,18 @@ def gh_run(argv: list[str], *, cwd: Path | None = None, max_wait: int = GH_INROU
         text = (p.stderr or "") + "\n" + (p.stdout or "")
         kind = _gh_rate_kind(text)
         if kind is None:
+            if retry_transient and _GH_TRANSIENT_RE.search(text) and transient_attempt < _GH_TRANSIENT_RETRIES:
+                nap = 2 * (1 << transient_attempt)
+                if waited + nap > max_wait:
+                    return p
+                log(
+                    f"gh: transient GitHub transport/server failure — waiting {nap}s, then retrying "
+                    f"({' '.join(argv[1:3])})"
+                )
+                time.sleep(nap)
+                waited += nap
+                transient_attempt += 1
+                continue
             return p
         if kind == "primary":
             log(
@@ -297,7 +324,7 @@ def gh_run(argv: list[str], *, cwd: Path | None = None, max_wait: int = GH_INROU
                 "waits out the hourly reset (waiting in-round would exceed the round timeout)"
             )
             return p
-        nap = _gh_secondary_wait(text, attempt)
+        nap = _gh_secondary_wait(text, secondary_attempt)
         if waited + nap > max_wait:
             log(
                 f"gh: secondary rate limit, but the in-round wait budget is spent ({waited}s) — "
@@ -307,7 +334,7 @@ def gh_run(argv: list[str], *, cwd: Path | None = None, max_wait: int = GH_INROU
         log(f"gh: secondary rate limit — waiting {nap}s for it to clear, then retrying ({' '.join(argv[1:3])})")
         time.sleep(nap)
         waited += nap
-        attempt += 1
+        secondary_attempt += 1
 
 
 # ============================================================================
@@ -319,14 +346,14 @@ class GitHub:
     def __init__(self, repo: str = TAUCETI):
         self.repo = repo
 
-    def _gh(self, args: list[str]) -> subprocess.CompletedProcess:
-        return gh_run(["gh", *args])
+    def _gh(self, args: list[str], *, retry_transient: bool = False) -> subprocess.CompletedProcess:
+        return gh_run(["gh", *args], retry_transient=retry_transient)
 
     def pr_list(self, fields: list[str], *, author: str | None = None, state: str = "open") -> list[dict]:
         args = ["pr", "list", "--repo", self.repo, "--state", state, "--limit", "200", "--json", ",".join(fields)]
         if author:
             args += ["--author", author]
-        p = self._gh(args)
+        p = self._gh(args, retry_transient=True)
         if p.returncode != 0:
             raise GitHubError(f"gh pr list failed: {p.stderr.strip()}")
         return json.loads(p.stdout or "[]")
@@ -346,10 +373,20 @@ class GitHub:
         return json.loads(p.stdout or "[]")
 
     def pr_view(self, pr: int, fields: list[str]) -> dict | None:
-        p = self._gh(["pr", "view", str(pr), "--repo", self.repo, "--json", ",".join(fields)])
+        p = self._gh(["pr", "view", str(pr), "--repo", self.repo, "--json", ",".join(fields)], retry_transient=True)
         if p.returncode != 0:
             return None
         return json.loads(p.stdout or "{}")
+
+    def pr_view_required(self, pr: int, fields: list[str]) -> dict:
+        """Read one PR or fail the survey; never turn a transport error into a missing candidate."""
+        p = self._gh(["pr", "view", str(pr), "--repo", self.repo, "--json", ",".join(fields)], retry_transient=True)
+        if p.returncode != 0:
+            raise GitHubError(f"gh pr view #{pr} failed: {p.stderr.strip()}")
+        try:
+            return json.loads(p.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise GitHubError(f"gh pr view #{pr} returned invalid JSON: {exc}") from exc
 
     @staticmethod
     def _stuck_issue_body(pr: int, reason: str, diagnostic: str = "") -> str:

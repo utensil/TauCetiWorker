@@ -67,7 +67,7 @@ def main() -> int:
 
     # Secondary limit clears on the second try: one wait of GH_SECONDARY_BASE, then success.
     fr, slept = with_stubs([(1, SECONDARY), (0, "")])
-    p = tc.gh_run(["gh", "pr", "list"])
+    p = tc.gh_run(["gh", "pr", "list"], retry_transient=True)
     check("secondary retries to success rc", p.returncode, 0)
     check("secondary waited once", slept, [tc.GH_SECONDARY_BASE])
     check("secondary made two gh calls", len(fr.calls), 2)
@@ -84,6 +84,30 @@ def main() -> int:
     check("non-limit returns the failure", p.returncode, 1)
     check("non-limit did not sleep", slept, [])
     check("non-limit made one call", len(fr.calls), 1)
+
+    # Transport/server truncation is retryable: it is exactly what a large GraphQL listing surfaces as
+    # when GitHub cancels a stream or returns a gateway timeout. The retry is short and bounded.
+    fr, slept = with_stubs([(1, "unexpected EOF"), (0, "")])
+    p = tc.gh_run(["gh", "pr", "list"], retry_transient=True)
+    check("transient transport retries to success rc", p.returncode, 0)
+    check("transient transport waited once", slept, [2])
+    check("transient transport made two calls", len(fr.calls), 2)
+
+    fr, slept = with_stubs([(1, "HTTP 504: gateway timeout"), (1, "stream error: CANCEL"), (1, "unexpected EOF")])
+    p = tc.gh_run(["gh", "pr", "list"], retry_transient=True)
+    check("transient transport retries are bounded", p.returncode, 1)
+    check("transient transport uses bounded backoff", slept, [2, 4])
+    check("transient transport stops after three calls", len(fr.calls), 3)
+
+    fr, slept = with_stubs([(1, "unexpected end of JSON input")])
+    p = tc.gh_run(["gh", "pr", "list"], max_wait=1, retry_transient=True)
+    check("transient transport respects in-round wait budget", p.returncode, 1)
+    check("over-budget transient does not sleep", slept, [])
+
+    fr, slept = with_stubs([(1, "unexpected EOF")])
+    p = tc.gh_run(["gh", "api", "-X", "POST", "/mutation"])
+    check("transient retry is opt-in for mutation safety", p.returncode, 1)
+    check("unmarked mutation-shaped call is not retried", len(fr.calls), 1)
 
     # Primary limit surfaces IMMEDIATELY (the loop preflight waits the hourly reset out; waiting in a
     # round under ROUND_TIMEOUT would just be SIGKILLed). No retry, no sleep.
