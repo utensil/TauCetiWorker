@@ -228,7 +228,11 @@ class FakeGH:
 
     def pr_list(self, fields):
         self.list_calls.append(tuple(fields))
-        if tuple(fields) == tc.PR_SCOPE_INDEX_FIELDS:
+        if tuple(fields) in (
+            tc.PR_SCOPE_INDEX_FIELDS,
+            tc.PR_AUTHOR_SCOPE_INDEX_FIELDS,
+            tc.PR_SCOPE_UNION_INDEX_FIELDS,
+        ):
             return self.index
         return self.full
 
@@ -293,7 +297,7 @@ try:
         review_scope_authors=["contributor-a"],
         scoped_review_only=True,
     )
-    check("author scope uses only the lightweight index", gh.list_calls, [tc.PR_SCOPE_INDEX_FIELDS])
+    check("author scope uses only number and author", gh.list_calls, [tc.PR_AUTHOR_SCOPE_INDEX_FIELDS])
     check("author scope hydrates only matching authors", [n for n, _ in gh.view_calls], [6])
     check("author scope candidate set", [c.pr for c in sv.reviewable.actionable], [6])
     check("author scope strategy is observable", sv.review_query_strategy, "scope-union")
@@ -329,6 +333,7 @@ try:
         scoped_review_only=True,
     )
     check("three-way scope hydrates the exact union", [n for n, _ in gh.view_calls], [10, 11, 13])
+    check("three-way scope uses the combined lightweight index", gh.list_calls, [tc.PR_SCOPE_UNION_INDEX_FIELDS])
     check("three-way scope candidate set", [c.pr for c in sv.reviewable.actionable], [10, 11, 13])
 
     gh = FakeGH(views={9: tc.GitHubError("gh pr view #9 failed: unexpected EOF")})
