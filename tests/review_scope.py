@@ -24,7 +24,7 @@ def check(name, got, want):
     print(f"[{'OK ' if ok else 'XX '}] {name}: got {got!r} want {want!r}")
 
 
-def pr(number, *labels, focuses=()):
+def pr(number, *labels, focuses=(), author="someone"):
     return tc.PRInfo(
         number=number,
         head_oid=f"head{number}",
@@ -33,7 +33,7 @@ def pr(number, *labels, focuses=()):
         head_repo="TauCeti",
         is_draft=False,
         mergeable="MERGEABLE",
-        author="someone",
+        author=author,
         build_success=True,
         build_failed=False,
         labels=tuple(labels),
@@ -41,20 +41,20 @@ def pr(number, *labels, focuses=()):
     )
 
 
-def scoped(roadmaps=(), prs=()):
+def scoped(roadmaps=(), prs=(), authors=()):
     sv = tc.Survey(worker_id="test")
     sv.open_prs = [
         pr(1, "roadmap/RepresentationTheory"),
         pr(2, "roadmap/ReductiveGroups"),
         pr(3, "roadmap/Unknown", focuses=("RepresentationTheory",)),
         pr(4, focuses=("RepresentationTheory",)),
-        pr(5, "roadmap/none"),
+        pr(5, "roadmap/none", author="Contributor-A"),
         pr(6, "roadmap/RepresentationTheory", "roadmap/ReductiveGroups"),
         pr(7, "roadmap/unknown", focuses=("RepresentationTheory",)),
     ]
     sv.reviewable.actionable = [tc.Candidate(item.number, item.head_oid) for item in sv.open_prs]
     sv.needs_fix.actionable = [tc.Candidate(99, "fix-head")]
-    tc.scope_review_candidates(sv, list(roadmaps), list(prs))
+    tc.scope_review_candidates(sv, list(roadmaps), list(prs), list(authors))
     return sv
 
 
@@ -80,15 +80,26 @@ check(
     [c.pr for c in scoped(["RepresentationTheory"], [2, 5]).reviewable.actionable],
     [1, 2, 4, 5, 6],
 )
+check(
+    "author scope matches case-insensitively",
+    [c.pr for c in scoped(authors=["contributor-a"]).reviewable.actionable],
+    [5],
+)
+check(
+    "roadmap, PR, and author filters form one union",
+    [c.pr for c in scoped(["RepresentationTheory"], [2], ["contributor-a"]).reviewable.actionable],
+    [1, 2, 4, 5, 6],
+)
 sv = scoped(["RepresentationTheory"], [2])
 check("excluded candidates are observable", [c.pr for c in sv.review_scope_excluded], [3, 5, 7])
 check("another work stage is untouched", [c.pr for c in sv.needs_fix.actionable], [99])
 
-poison_names = ("TAUCETI_REVIEW_ROADMAPS", "TAUCETI_REVIEW_PRS")
+poison_names = ("TAUCETI_REVIEW_ROADMAPS", "TAUCETI_REVIEW_PRS", "TAUCETI_REVIEW_AUTHORS")
 saved = {name: os.environ.get(name) for name in poison_names}
 try:
     os.environ["TAUCETI_REVIEW_ROADMAPS"] = "HiddenRoadmap"
     os.environ["TAUCETI_REVIEW_PRS"] = "999"
+    os.environ["TAUCETI_REVIEW_AUTHORS"] = "hidden-contributor"
     parser = argparse.ArgumentParser()
     tc.add_review_scope_flags(parser)
     args = parser.parse_args(
@@ -99,30 +110,42 @@ try:
             "3809",
             "--review-pr",
             "3871,3827",
+            "--review-author",
+            "Contributor-A,contributor-b",
+            "--review-author",
+            "CONTRIBUTOR-A",
         ]
     )
     check("repeatable roadmap flag parses", args.review_roadmap, ["RepresentationTheory,ReductiveGroups"])
     check("repeatable PR flag parses", args.review_pr, ["3809", "3871,3827"])
+    check("repeatable author flag parses", args.review_author, ["Contributor-A,contributor-b", "CONTRIBUTOR-A"])
     check(
         "CLI scope is normalized without Worker state",
         tc.parse_review_scope(args),
-        (["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871]),
+        (["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871], ["contributor-a", "contributor-b"]),
     )
     check("ambient roadmap value is ignored and untouched", os.environ["TAUCETI_REVIEW_ROADMAPS"], "HiddenRoadmap")
     check("ambient PR value is ignored and untouched", os.environ["TAUCETI_REVIEW_PRS"], "999")
+    check("ambient author value is ignored and untouched", os.environ["TAUCETI_REVIEW_AUTHORS"], "hidden-contributor")
     check(
         "no CLI scope stays unscoped despite ambient poison",
-        tc.parse_review_scope(SimpleNamespace(review_roadmap=None, review_pr=None)),
-        ([], []),
+        tc.parse_review_scope(SimpleNamespace(review_roadmap=None, review_pr=None, review_author=None)),
+        ([], [], []),
     )
     check(
         "loop children receive scope only as explicit argv",
-        tc.review_scope_tail(["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871]),
+        tc.review_scope_tail(
+            ["ReductiveGroups", "RepresentationTheory"],
+            [3809, 3827, 3871],
+            ["contributor-a", "contributor-b"],
+        ),
         [
             "--review-roadmap",
             "ReductiveGroups,RepresentationTheory",
             "--review-pr",
             "3809,3827,3871",
+            "--review-author",
+            "contributor-a,contributor-b",
         ],
     )
 
@@ -142,8 +165,20 @@ try:
         malformed_area_rejected = False
     check("malformed roadmap CLI fails loudly", malformed_area_rejected, True)
 
-    for attr, flag in (("review_roadmap", "--review-roadmap"), ("review_pr", "--review-pr")):
-        values = {"review_roadmap": None, "review_pr": None}
+    try:
+        tc.parse_review_scope(SimpleNamespace(review_author=["bad--login"]))
+    except tc.Die:
+        malformed_author_rejected = True
+    else:
+        malformed_author_rejected = False
+    check("malformed author CLI fails loudly", malformed_author_rejected, True)
+
+    for attr, flag in (
+        ("review_roadmap", "--review-roadmap"),
+        ("review_pr", "--review-pr"),
+        ("review_author", "--review-author"),
+    ):
+        values = {"review_roadmap": None, "review_pr": None, "review_author": None}
         values[attr] = [" , "]
         try:
             tc.parse_review_scope(SimpleNamespace(**values))
@@ -160,7 +195,7 @@ finally:
             os.environ[name] = value
 
 
-def raw_pr(number, *, state="OPEN", labels=(), body="", green=True):
+def raw_pr(number, *, state="OPEN", labels=(), body="", green=True, author="someone"):
     return {
         "number": number,
         "title": f"PR {number}",
@@ -171,7 +206,7 @@ def raw_pr(number, *, state="OPEN", labels=(), body="", green=True):
         "headRepository": {"name": "TauCeti"},
         "isDraft": False,
         "statusCheckRollup": ([{"context": "build", "state": "SUCCESS"}] if green else []),
-        "author": {"login": "someone", "is_bot": False},
+        "author": {"login": author, "is_bot": False},
         "mergeable": "MERGEABLE",
         "labels": [{"name": label} for label in labels],
         "state": state,
@@ -245,7 +280,56 @@ try:
     check("roadmap scope uses only the lightweight index", gh.list_calls, [tc.PR_SCOPE_INDEX_FIELDS])
     check("roadmap union hydrates only matches and explicit PRs", [n for n, _ in gh.view_calls], [1, 2, 5])
     check("roadmap union candidate set", [c.pr for c in sv.reviewable.actionable], [1, 2, 5])
-    check("roadmap union strategy is observable", sv.review_query_strategy, "roadmap-union")
+    check("roadmap union strategy is observable", sv.review_query_strategy, "scope-union")
+
+    index = [raw_pr(6, author="Contributor-A"), raw_pr(7, author="someone-else")]
+    gh = FakeGH(index=index, views={6: index[0]})
+    sv = survey_module.survey(
+        SimpleNamespace(wid="test"),
+        gh,
+        None,
+        FakeCounters(),
+        deep=False,
+        review_scope_authors=["contributor-a"],
+        scoped_review_only=True,
+    )
+    check("author scope uses only the lightweight index", gh.list_calls, [tc.PR_SCOPE_INDEX_FIELDS])
+    check("author scope hydrates only matching authors", [n for n, _ in gh.view_calls], [6])
+    check("author scope candidate set", [c.pr for c in sv.reviewable.actionable], [6])
+    check("author scope strategy is observable", sv.review_query_strategy, "scope-union")
+
+    index = [raw_pr(8, author="Contributor-A")]
+    gh = FakeGH(index=index, views={8: raw_pr(8, author="someone-else")})
+    sv = survey_module.survey(
+        SimpleNamespace(wid="test"),
+        gh,
+        None,
+        FakeCounters(),
+        deep=False,
+        review_scope_authors=["contributor-a"],
+        scoped_review_only=True,
+    )
+    check("hydrated author is rechecked before selection", [c.pr for c in sv.reviewable.actionable], [])
+
+    index = [
+        raw_pr(10, labels=("roadmap/RepresentationTheory",)),
+        raw_pr(11, author="Contributor-A"),
+        raw_pr(12),
+    ]
+    gh = FakeGH(index=index, views={10: index[0], 11: index[1], 13: raw_pr(13)})
+    sv = survey_module.survey(
+        SimpleNamespace(wid="test"),
+        gh,
+        None,
+        FakeCounters(),
+        deep=False,
+        review_scope_roadmaps=["RepresentationTheory"],
+        review_scope_prs=[13],
+        review_scope_authors=["contributor-a"],
+        scoped_review_only=True,
+    )
+    check("three-way scope hydrates the exact union", [n for n, _ in gh.view_calls], [10, 11, 13])
+    check("three-way scope candidate set", [c.pr for c in sv.reviewable.actionable], [10, 11, 13])
 
     gh = FakeGH(views={9: tc.GitHubError("gh pr view #9 failed: unexpected EOF")})
     sv = survey_module.survey(

@@ -93,7 +93,7 @@ PR_QUERY_FIELDS = (
     "labels",
 )
 
-PR_SCOPE_INDEX_FIELDS = ("number", "body", "labels")
+PR_SCOPE_INDEX_FIELDS = ("number", "body", "labels", "author")
 
 
 def target_marker_focuses(body: str) -> tuple[str, ...]:
@@ -205,10 +205,11 @@ class Survey:
     n_status_unlabeled: int = 0
     rebaseable: WorkKind = field(default_factory=lambda: WorkKind("rebase"))
     reviewable: WorkKind = field(default_factory=lambda: WorkKind("review"))
-    # Optional review-only allowlists. Empty+empty preserves the upstream unscoped queue. When either
-    # is non-empty, candidates are admitted by the UNION of exact PR numbers and roadmap areas.
+    # Optional review-only allowlists. All empty preserves the upstream unscoped queue. Otherwise,
+    # candidates are admitted by the UNION of exact PR numbers, roadmap areas, and authors.
     review_scope_roadmaps: list[str] = field(default_factory=list)
     review_scope_prs: list[int] = field(default_factory=list)
+    review_scope_authors: list[str] = field(default_factory=list)
     review_scope_excluded: list[Candidate] = field(default_factory=list)
     review_query_scoped: bool = False
     review_query_strategy: str = "full"
@@ -370,48 +371,53 @@ def pr_roadmap_areas(pr: PRInfo) -> set[str]:
     return set(pr.target_focuses)
 
 
-def scope_review_candidates(sv: Survey, roadmaps: list[str], prs: list[int]) -> None:
-    """Filter review candidates to the union of allowed roadmap areas and explicit PRs.
+def scope_review_candidates(sv: Survey, roadmaps: list[str], prs: list[int], authors: list[str]) -> None:
+    """Filter review candidates to the union of roadmap areas, explicit PRs, and authors.
 
     This only removes actionable review candidates. It cannot make an ineligible PR actionable, does
-    not touch another work stage, and preserves the upstream queue when both allowlists are empty.
+    not touch another work stage, and preserves the upstream queue when all allowlists are empty.
     """
     sv.review_scope_roadmaps = list(roadmaps)
     sv.review_scope_prs = list(prs)
-    if not roadmaps and not prs:
+    sv.review_scope_authors = list(authors)
+    if not roadmaps and not prs and not authors:
         return
     allowed_areas = {area.casefold() for area in roadmaps}
     allowed_prs = set(prs)
+    allowed_authors = {author.casefold() for author in authors}
     info = {pr.number: pr for pr in sv.open_prs}
     kept: list[Candidate] = []
     for candidate in sv.reviewable.actionable:
         pr = info.get(candidate.pr)
         area_match = bool(pr and allowed_areas.intersection(area.casefold() for area in pr_roadmap_areas(pr)))
-        if candidate.pr in allowed_prs or area_match:
+        author_match = bool(pr and pr.author.casefold() in allowed_authors)
+        if candidate.pr in allowed_prs or area_match or author_match:
             kept.append(candidate)
         else:
             sv.review_scope_excluded.append(candidate)
     sv.reviewable.actionable = kept
 
 
-def scoped_review_pr_json(gh: GitHub, roadmaps: list[str], prs: list[int]) -> list[dict]:
+def scoped_review_pr_json(gh: GitHub, roadmaps: list[str], prs: list[int], authors: list[str]) -> list[dict]:
     """Load only human-scoped PRs for a review-only round.
 
-    Explicit PR scopes never enumerate the repository. Roadmap scopes first read a lightweight open-PR
-    index (body is needed only for the existing target-marker fallback), then hydrate the matching union
-    one PR at a time. Hydration repeats labels/body and the final candidate filter rechecks the scope, so
-    a label or marker that changes between discovery and hydration cannot widen the approved set.
+    Explicit PR scopes never enumerate the repository. Roadmap or author scopes first read a lightweight
+    open-PR index, then hydrate the matching union one PR at a time. Hydration repeats the scope metadata
+    and the final candidate filter rechecks the scope, so a change between discovery and hydration cannot
+    widen the approved set.
 
     Every requested view is strict: a network/GraphQL failure aborts the survey instead of silently
     turning an approved PR into "not present". Closed and merged PRs are ordinary, successful reads and
     are excluded by their returned state.
     """
     allowed = set(prs)
-    if roadmaps:
+    if roadmaps or authors:
         areas = {area.casefold() for area in roadmaps}
+        author_logins = {author.casefold() for author in authors}
         for item in gh.pr_list(list(PR_SCOPE_INDEX_FIELDS)):
             info = PRInfo.from_json(item)
-            if areas.intersection(area.casefold() for area in pr_roadmap_areas(info)):
+            area_match = bool(areas.intersection(area.casefold() for area in pr_roadmap_areas(info)))
+            if area_match or info.author.casefold() in author_logins:
                 allowed.add(info.number)
 
     out: list[dict] = []
@@ -591,6 +597,7 @@ def survey(
     deep: bool = True,
     review_scope_roadmaps: list[str] | tuple[str, ...] = (),
     review_scope_prs: list[int] | tuple[int, ...] = (),
+    review_scope_authors: list[str] | tuple[str, ...] = (),
     scoped_review_only: bool = False,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
@@ -605,25 +612,27 @@ def survey(
     # and every ~90s in the dashboard, which would re-roll and flicker the displayed area.
     scope_roadmaps = list(review_scope_roadmaps)
     scope_prs = list(review_scope_prs)
-    use_scoped_query = scoped_review_only and bool(scope_roadmaps or scope_prs)
+    scope_authors = list(review_scope_authors)
+    use_scoped_query = scoped_review_only and bool(scope_roadmaps or scope_prs or scope_authors)
     sv = Survey(
         worker_id=cfg.wid,
         roadmap_only=("auto" if _f is None else (_f or "any")),
         roadmap_skip=roadmap_skip(),
         review_scope_roadmaps=scope_roadmaps,
         review_scope_prs=scope_prs,
+        review_scope_authors=scope_authors,
         review_query_scoped=use_scoped_query,
         review_query_strategy=(
             "explicit-pr"
-            if use_scoped_query and not scope_roadmaps
-            else "roadmap-union"
+            if use_scoped_query and not scope_roadmaps and not scope_authors
+            else "scope-union"
             if use_scoped_query
             else "full"
         ),
     )
     try:
         raw = (
-            scoped_review_pr_json(gh, scope_roadmaps, scope_prs)
+            scoped_review_pr_json(gh, scope_roadmaps, scope_prs, scope_authors)
             if use_scoped_query
             else gh.pr_list(list(PR_QUERY_FIELDS))
         )
@@ -826,7 +835,7 @@ def survey(
         c = Candidate(0, "", reason or "progress report")
         (sv.progress.actionable if due else sv.progress.suppressed).append(c)
 
-    scope_review_candidates(sv, scope_roadmaps, scope_prs)
+    scope_review_candidates(sv, scope_roadmaps, scope_prs, scope_authors)
     sv.next_auto_stage = _next_auto_stage(sv)
     return sv
 

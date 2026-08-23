@@ -109,6 +109,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `roadmap_extra_identities` | string list | `[]` | Extra GitHub logins whose claimed intentions count as this worker's own |
 | `review_roadmap` | string list | `[]` | Roadmap labels admitted to review, forwarded only as `--review-roadmap` CLI arguments |
 | `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
+| `review_author` | string list | `[]` | GitHub authors admitted to review, unioned with `review_roadmap` and `review_pr`, and forwarded only as `--review-author` CLI arguments |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
 | `source` | string | unset | Supplementary repository directory or URL. Requires `roadmap` in `only` and a non-empty `roadmap_only` |
 | `author_model` | string | unset | Exact authoring model. Requires an `agent` other than `auto` |
@@ -130,8 +131,8 @@ and both `workers status` and the dashboard name the variables it sets, so the
 odd worker out is visible rather than mysterious.
 
 Review allowlists remain command-local from the Worker's perspective. The
-manager stores launcher desired state, then emits `review_roadmap` and
-`review_pr` only as explicit CLI arguments to the loop; it does not translate
+manager stores launcher desired state, then emits `review_roadmap`, `review_pr`, and
+`review_author` only as explicit CLI arguments to the loop; it does not translate
 them into environment variables or mutable worker state. Put a private
 `workers.toml` under the operations project when the approval list itself is
 private.
@@ -182,7 +183,7 @@ entry with `enabled = true`.
 | `--stream` | `stream` |
 | `--isolate-home` | `isolate_home`; useful when the id is `default` |
 
-`add` cannot set `roadmap_extra_identities`, `review_roadmap`, `review_pr`,
+`add` cannot set `roadmap_extra_identities`, `review_roadmap`, `review_pr`, `review_author`,
 `respect_claims`, or `restart`, and always writes `enabled = true`. Use
 `workers edit` for those.
 

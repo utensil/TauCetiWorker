@@ -18,8 +18,9 @@ list is in `tauceti work -h`. For persistent workers, see
 | `--bubble` | Run code and review agents inside the Bubble sandbox instead of directly on the host. The outer survey and coordination, plus all progress-report rounds, remain on the host. |
 | `--host` | Deprecated no-op: the host is now the default. It only warns; pass `--bubble` for the sandbox. |
 | `--stream` | Stream the agent's log to the terminal instead of a file under `logs/`. |
-| `--review-roadmap AREA[,AREA...]` | Allow actionable review candidates from these roadmap areas. Repeatable; unioned with `--review-pr`. A review-only work round uses a lightweight roadmap index, then hydrates matching PRs. |
-| `--review-pr NUMBER[,NUMBER...]` | Allow these explicit actionable PRs. Repeatable; unioned with `--review-roadmap`. A review-only work round views only the scoped union. |
+| `--review-roadmap AREA[,AREA...]` | Allow actionable review candidates from these roadmap areas. Repeatable; unioned with `--review-pr` and `--review-author`. A review-only work round uses a lightweight scope index, then hydrates matching PRs. |
+| `--review-pr NUMBER[,NUMBER...]` | Allow these explicit actionable PRs. Repeatable; unioned with `--review-roadmap` and `--review-author`. An explicit-PR-only review round views just these numbers. |
+| `--review-author LOGIN[,LOGIN...]` | Allow actionable review candidates from these GitHub authors. Repeatable; unioned with `--review-roadmap` and `--review-pr`. Matching is case-insensitive. |
 | `--roadmap-only AREA` | The single roadmap area for roadmap rounds (empty = all areas). |
 | `--roadmap-skip AREA[,AREA...]` | Roadmap areas to exclude from selection (`--roadmap-only` wins on overlap). |
 | `--source PATH_OR_URL` | Supplementary local Git repository directory or Git repository URL (checked-out/default `HEAD`) for authoring a PR. A shallow snapshot is stored in worker state, refreshed on later rounds, and mounted read-only in Bubble mode. Requires the roadmap phase to be enabled and one specific `--roadmap-only AREA`; other enabled phases ignore it, and the roadmap and review quality remain authoritative. |
