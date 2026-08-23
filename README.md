@@ -122,32 +122,35 @@ drops kinds from the cascade (the two combine by subtraction):
 tauceti work --loop --only review     # only review open PRs
 tauceti work --loop --only review --review-roadmap RepresentationTheory
 tauceti work --loop --only review --review-roadmap RepresentationTheory --review-pr 3839,3859
+tauceti work --loop --only review --review-author contributor-a
 tauceti work --loop --only fix,fix-ci # only tend to our own PRs
 tauceti work --loop --skip roadmap    # everything except authoring new PRs
 ```
 
 Review loops can be rationed without replacing the Worker's normal eligibility, shuffle, claims,
-pacing, or one-round dispatch. `--review-roadmap <area>` and `--review-pr <number>` are repeatable and
-also accept comma-separated values. When either is present, an actionable review candidate is retained
-when its PR number is explicitly allowed **or** one of its `roadmap/<area>` labels is allowed. The two
-allowlists therefore form a union; candidates outside it are filtered before the Worker shuffles and
-selects. An explicit PR can admit an unlabelled or `roadmap/Unknown` candidate. Omit both flags to keep
-the upstream unscoped review queue.
+pacing, or one-round dispatch. `--review-roadmap <area>`, `--review-pr <number>`, and
+`--review-author <login>` are repeatable and also accept comma-separated values. When any is present,
+an actionable review candidate is retained when its PR number is explicitly allowed **or** one of its
+`roadmap/<area>` labels is allowed **or** its author is allowed. The allowlists therefore form one
+union; candidates outside it are filtered before the Worker shuffles and selects. An explicit PR or
+author can admit an unlabelled or `roadmap/Unknown` candidate. Omit all three flags to keep the upstream
+unscoped review queue.
 
-A review-only work round also scopes its GitHub reads. An explicit-PR scope views only those PR numbers;
-a roadmap scope first reads a lightweight open-PR roadmap index and then hydrates only its matches plus
-explicit exceptions. Each hydrated PR is rechecked as open and the final scope filter runs again before
-selection. Unscoped, status/dashboard, and multi-stage surveys retain the full upstream survey because
-their other work kinds need repository-wide state.
+A review-only work round also scopes its GitHub reads. An explicit-PR-only scope views only those PR
+numbers; a roadmap or author scope first reads a lightweight open-PR scope index and then hydrates only
+the union's matches plus explicit exceptions. Each hydrated PR is rechecked as open and the final scope
+filter runs again before selection. Unscoped, status/dashboard, and multi-stage surveys retain the full
+upstream survey because their other work kinds need repository-wide state.
 
 ```bash
-# RepresentationTheory, plus two hand-picked exceptions from any roadmap:
+# RepresentationTheory, one author, plus two hand-picked exceptions:
 tauceti work --loop --only review \
   --review-roadmap RepresentationTheory \
+  --review-author contributor-a \
   --review-pr 3839 --review-pr 3859
 
 # Preview the same scoped survey without launching a reviewer:
-tauceti status --review-roadmap RepresentationTheory --review-pr 3839 --json
+tauceti status --review-roadmap RepresentationTheory --review-author contributor-a --review-pr 3839 --json
 ```
 
 Review scope is deliberately CLI-only and stateless. It is never read from or written to environment,

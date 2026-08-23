@@ -113,6 +113,7 @@ class RoundOpts:
     review_min_age: int = 0  # minutes a PR must have been awaiting review before this worker takes it
     review_scope_roadmaps: list[str] = field(default_factory=list)
     review_scope_prs: list[int] = field(default_factory=list)
+    review_scope_authors: list[str] = field(default_factory=list)
 
     @property
     def agent_name(self) -> str:
@@ -217,6 +218,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         deep=True,
         review_scope_roadmaps=getattr(opts, "review_scope_roadmaps", ()),
         review_scope_prs=getattr(opts, "review_scope_prs", ()),
+        review_scope_authors=getattr(opts, "review_scope_authors", ()),
         scoped_review_only=set(opts.only) == {"review"},
     )
     if sv.github_failed:
@@ -225,11 +227,12 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
 
     label = "scoped open PRs" if sv.review_query_scoped else "open PRs"
     log(f"{label}: {sv.status_label_line()}")
-    if sv.review_scope_roadmaps or sv.review_scope_prs:
+    if sv.review_scope_roadmaps or sv.review_scope_prs or sv.review_scope_authors:
         areas = ",".join(sv.review_scope_roadmaps) or "none"
         prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"
+        authors = ",".join(sv.review_scope_authors) or "none"
         log(
-            f"review scope: roadmaps={areas}; prs={prs}; "
+            f"review scope: roadmaps={areas}; prs={prs}; authors={authors}; "
             f"excluded {len(sv.review_scope_excluded)} otherwise-actionable candidate(s)"
         )
         if sv.review_query_scoped:

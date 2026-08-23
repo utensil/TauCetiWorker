@@ -93,6 +93,8 @@ examples:
                                         review only that roadmap's actionable PRs
   tauceti work --loop --only review --review-roadmap RepresentationTheory --review-pr 3839,3859
                                         union a roadmap scope with explicit PRs
+  tauceti work --loop --only review --review-author contributor-a
+                                        review actionable PRs from an allowed author
   tauceti work --loop --skip roadmap    the whole cascade except authoring new PRs
   tauceti work --only roadmap --roadmap-only ReductiveGroups
   tauceti work --loop --roadmap-skip OneParameterSemigroups   leave that area to other workers
@@ -136,7 +138,8 @@ def add_review_scope_flags(p: argparse.ArgumentParser) -> None:
         default=None,
         metavar="AREA[,AREA...]",
         help="allow review candidates carrying any of these roadmap/<area> labels; repeatable and "
-        "comma-separated. Unioned with --review-pr. Omit both scope flags for the upstream unscoped queue",
+        "comma-separated. Unioned with --review-pr and --review-author. Omit all review scope flags "
+        "for the upstream unscoped queue",
     )
     p.add_argument(
         "--review-pr",
@@ -144,7 +147,15 @@ def add_review_scope_flags(p: argparse.ArgumentParser) -> None:
         default=None,
         metavar="NUMBER[,NUMBER...]",
         help="allow these explicit PR numbers into the review queue; repeatable and comma-separated. "
-        "Unioned with --review-roadmap",
+        "Unioned with --review-roadmap and --review-author",
+    )
+    p.add_argument(
+        "--review-author",
+        action="append",
+        default=None,
+        metavar="LOGIN[,LOGIN...]",
+        help="allow review candidates authored by any of these GitHub logins; repeatable and "
+        "comma-separated. Unioned with --review-roadmap and --review-pr",
     )
 
 
@@ -404,7 +415,7 @@ def resolve_review_throttle(cli_value: int | None, env: str, flag: str) -> int:
     return cli_value
 
 
-def parse_review_scope(args) -> tuple[list[str], list[int]]:
+def parse_review_scope(args) -> tuple[list[str], list[int], list[str]]:
     """Validate explicit review allowlists without reading or writing environment/state.
 
     Scope is command-local. A loop forwards the normalized values as CLI arguments to every child;
@@ -429,7 +440,12 @@ def parse_review_scope(args) -> tuple[list[str], list[int]]:
         if not token.isdigit() or int(token) <= 0:
             raise Die(f"--review-pr contains an invalid PR number: {token!r}")
         prs.add(int(token))
-    return sorted(roadmaps, key=str.casefold), sorted(prs)
+    authors: set[str] = set()
+    for token in tokens(getattr(args, "review_author", None), "--review-author"):
+        if len(token) > 39 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", token) or "--" in token:
+            raise Die(f"--review-author contains an invalid GitHub login: {token!r}")
+        authors.add(token.casefold())
+    return sorted(roadmaps, key=str.casefold), sorted(prs), sorted(authors)
 
 
 def resolve_agent(args) -> str:
@@ -689,7 +705,7 @@ def cmd_usage(args) -> int:
 
 
 def cmd_status(args) -> int:
-    review_scope_roadmaps, review_scope_prs = parse_review_scope(args)
+    review_scope_roadmaps, review_scope_prs, review_scope_authors = parse_review_scope(args)
     cfg = Config.resolve(getattr(args, "worker_id", None))
     gh = GitHub()
     rs = ReviewState(cfg, gh)
@@ -702,6 +718,7 @@ def cmd_status(args) -> int:
         deep=True,
         review_scope_roadmaps=review_scope_roadmaps,
         review_scope_prs=review_scope_prs,
+        review_scope_authors=review_scope_authors,
     )
     _, quota_snap = Quota(cfg).choose(None)
 
@@ -724,7 +741,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             "--host is now the default (the agent runs directly on the host); it is a no-op. "
             "Pass --bubble to run inside the sandbox instead"
         )
-    review_scope_roadmaps, review_scope_prs = parse_review_scope(args)
+    review_scope_roadmaps, review_scope_prs, review_scope_authors = parse_review_scope(args)
     author_model = getattr(args, "author_model", None)
     author_effort = getattr(args, "author_effort", None)
     resolved_author_fallback_model = getattr(args, "resolved_author_fallback_model", None)
@@ -836,6 +853,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             agent=agent,
             review_scope_roadmaps=review_scope_roadmaps,
             review_scope_prs=review_scope_prs,
+            review_scope_authors=review_scope_authors,
         )
     dry = getattr(args, "dry_run", False)
     ignore_quota = getattr(args, "ignore_quota", False)
@@ -892,6 +910,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             review_min_age=review_min_age,
             review_scope_roadmaps=review_scope_roadmaps,
             review_scope_prs=review_scope_prs,
+            review_scope_authors=review_scope_authors,
         )
         # Before preflight, and NOT gated on --dry-run: --dry-run is how an operator checks their setup,
         # so it is the one run that most needs to answer "am I on the right account?". The check is a

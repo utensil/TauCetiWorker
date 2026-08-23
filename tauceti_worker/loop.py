@@ -21,13 +21,19 @@ class _LoopTerminated(KeyboardInterrupt):
     """SIGTERM translated to the same teardown path as Ctrl-C, with the right exit code."""
 
 
-def review_scope_tail(roadmaps: list[str] | tuple[str, ...], prs: list[int] | tuple[int, ...]) -> list[str]:
+def review_scope_tail(
+    roadmaps: list[str] | tuple[str, ...],
+    prs: list[int] | tuple[int, ...],
+    authors: list[str] | tuple[str, ...],
+) -> list[str]:
     """Explicit child argv for a stateless review scope."""
     tail: list[str] = []
     if roadmaps:
         tail += ["--review-roadmap", ",".join(roadmaps)]
     if prs:
         tail += ["--review-pr", ",".join(str(pr) for pr in prs)]
+    if authors:
+        tail += ["--review-author", ",".join(authors)]
     return tail
 
 
@@ -85,6 +91,7 @@ def cmd_loop(
     agent: str,
     review_scope_roadmaps: list[str] | tuple[str, ...] = (),
     review_scope_prs: list[int] | tuple[int, ...] = (),
+    review_scope_authors: list[str] | tuple[str, ...] = (),
 ) -> int:
     """The driver: pace against quota (codex preferred), run ONE round as a child under a hard timeout,
     then settle (short pause if productive, escalating back-off otherwise). Ctrl-C stops the current
@@ -207,7 +214,7 @@ def cmd_loop(
 
             # 2) Run ONE round as a child in its own process group, under the hard timeout.
             tail = ["--worker-id", cfg.wid]
-            tail += review_scope_tail(review_scope_roadmaps, review_scope_prs)
+            tail += review_scope_tail(review_scope_roadmaps, review_scope_prs, review_scope_authors)
             if only:
                 tail += ["--only", ",".join(only)]
             if model:

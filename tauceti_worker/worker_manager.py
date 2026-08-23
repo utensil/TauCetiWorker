@@ -51,6 +51,7 @@ _WORKER_KEYS = {
     "roadmap_extra_identities",
     "review_roadmap",
     "review_pr",
+    "review_author",
     "respect_claims",
     "source",
     "author_model",
@@ -207,6 +208,7 @@ _RESERVED_ENV = frozenset(
 # a name like `1A` or `A-B` can only be reached by contortion, so it is far likelier to be a typo.
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REVIEW_ROADMAP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_REVIEW_AUTHOR = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\Z")
 
 # Aggregate cap on one worker's table. The spec reaches the runner as a single command-line argument,
 # so an unbounded table becomes E2BIG at launch; refuse it while it is still a configuration error the
@@ -260,6 +262,17 @@ def _review_prs(value, where: str) -> tuple[int, ...]:
     return tuple(sorted(values))
 
 
+def _review_authors(value, where: str) -> tuple[str, ...]:
+    values = _strings(value, where)
+    bad = next(
+        (item for item in values if len(item) > 39 or not _REVIEW_AUTHOR.fullmatch(item) or "--" in item),
+        None,
+    )
+    if bad is not None:
+        raise WorkersError(f"{where} contains an invalid GitHub login: {bad!r}")
+    return tuple(sorted({item.casefold() for item in values}))
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkerSpec:
     id: str
@@ -274,6 +287,7 @@ class WorkerSpec:
     roadmap_extra_identities: tuple[str, ...] = ()
     review_roadmap: tuple[str, ...] = ()
     review_pr: tuple[int, ...] = ()
+    review_author: tuple[str, ...] = ()
     respect_claims: bool = True
     source: str | None = None
     author_model: str | None = None
@@ -326,6 +340,7 @@ class WorkerSpec:
             ),
             review_roadmap=_review_roadmaps(raw.get("review_roadmap", []), f"workers[{index}].review_roadmap"),
             review_pr=_review_prs(raw.get("review_pr", []), f"workers[{index}].review_pr"),
+            review_author=_review_authors(raw.get("review_author", []), f"workers[{index}].review_author"),
             respect_claims=_boolean(raw.get("respect_claims", True), f"workers[{index}].respect_claims"),
             source=_string(raw.get("source"), f"workers[{index}].source", optional=True),
             author_model=_string(raw.get("author_model"), f"workers[{index}].author_model", optional=True),
@@ -364,6 +379,8 @@ class WorkerSpec:
             value["review_roadmap"] = list(self.review_roadmap)
         if self.review_pr:
             value["review_pr"] = list(self.review_pr)
+        if self.review_author:
+            value["review_author"] = list(self.review_author)
         if not self.respect_claims:
             value["respect_claims"] = False
         for name in ("source", "author_model", "author_effort", "pace"):
@@ -408,6 +425,8 @@ class WorkerSpec:
             argv += ["--review-roadmap", ",".join(self.review_roadmap)]
         if self.review_pr:
             argv += ["--review-pr", ",".join(str(pr) for pr in self.review_pr)]
+        if self.review_author:
+            argv += ["--review-author", ",".join(self.review_author)]
         if not self.respect_claims:
             argv.append("--ignore-claims")
         for field, flag in (
@@ -1668,6 +1687,7 @@ def parse_legacy_config(path: Path) -> list[WorkerSpec]:
                 "--roadmap-extra-identities": "roadmap_extra_identities",
                 "--review-roadmap": "review_roadmap",
                 "--review-pr": "review_pr",
+                "--review-author": "review_author",
                 "--source": "source",
                 "--author-model": "author_model",
                 "--author-effort": "author_effort",
@@ -1675,9 +1695,9 @@ def parse_legacy_config(path: Path) -> list[WorkerSpec]:
             }.get(token)
             if key is None:
                 raise WorkersError(f"{path}:{number}: unsupported legacy argument {token}")
-            if key in ("only", "roadmap_skip", "roadmap_extra_identities", "review_roadmap"):
+            if key in ("only", "roadmap_skip", "roadmap_extra_identities", "review_roadmap", "review_author"):
                 items = value.split(",")
-                if key == "review_roadmap":
+                if key in ("review_roadmap", "review_author"):
                     values.setdefault(key, []).extend(items)
                 else:
                     values[key] = items
