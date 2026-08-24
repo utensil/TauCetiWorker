@@ -122,14 +122,17 @@ drops kinds from the cascade (the two combine by subtraction):
 tauceti work --loop --only review     # only review open PRs
 tauceti work --loop --only review --review-roadmap RepresentationTheory
 tauceti work --loop --only review --review-roadmap RepresentationTheory --review-pr 3839,3859
-tauceti work --loop --only review --review-author contributor-a
+tauceti work --loop --only review --review-author contributor-a,occasional-reviewer:0.3
 tauceti work --loop --only fix,fix-ci # only tend to our own PRs
 tauceti work --loop --skip roadmap    # everything except authoring new PRs
 ```
 
 Review loops can be rationed without replacing the Worker's normal eligibility, shuffle, claims,
 pacing, or one-round dispatch. `--review-roadmap <area>`, `--review-pr <number>`, and
-`--review-author <login>` are repeatable and also accept comma-separated values. When any is present,
+`--review-author <login[:probability]>` are repeatable and also accept comma-separated values. An
+omitted author probability defaults to `1.0`; a decimal probability from `0.0` through `1.0` samples
+that author independently once per round using a timestamp seed. The sampled result is an ordinary
+allowed-author array; probability does not alter the union below. When any scope flag is present,
 an actionable review candidate is retained when its PR number is explicitly allowed **or** one of its
 `roadmap/<area>` labels is allowed **or** its author is allowed. The allowlists therefore form one
 union; candidates outside it are filtered before the Worker shuffles and selects. An explicit PR or
@@ -146,7 +149,7 @@ upstream survey because their other work kinds need repository-wide state.
 # RepresentationTheory, one author, plus two hand-picked exceptions:
 tauceti work --loop --only review \
   --review-roadmap RepresentationTheory \
-  --review-author contributor-a \
+  --review-author contributor-a,occasional-reviewer:0.3 \
   --review-pr 3839 --review-pr 3859
 
 # Preview the same scoped survey without launching a reviewer:

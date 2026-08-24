@@ -109,7 +109,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `roadmap_extra_identities` | string list | `[]` | Extra GitHub logins whose claimed intentions count as this worker's own |
 | `review_roadmap` | string list | `[]` | Roadmap labels admitted to review, forwarded only as `--review-roadmap` CLI arguments |
 | `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
-| `review_author` | string list | `[]` | GitHub authors admitted to review, unioned with `review_roadmap` and `review_pr`, and forwarded only as `--review-author` CLI arguments |
+| `review_author` | string list | `[]` | GitHub authors as `login` or `login:decimal-probability` (default `1.0`), sampled once per round and then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
 | `source` | string | unset | Supplementary repository directory or URL. Requires `roadmap` in `only` and a non-empty `roadmap_only` |
 | `author_model` | string | unset | Exact authoring model. Requires an `agent` other than `auto` |
@@ -136,6 +136,10 @@ manager stores launcher desired state, then emits `review_roadmap`, `review_pr`,
 them into environment variables or mutable worker state. Put a private
 `workers.toml` under the operations project when the approval list itself is
 private.
+
+Author probabilities are decimal values from `0.0` through `1.0`, not
+percentages. Each round uses a timestamp seed to compute the final allowed-author
+array before the existing roadmap OR explicit-PR OR author union is applied.
 
 Put no secrets in it. The values are stored in plain `workers.toml`, and the
 whole worker definition is handed to its runner on a command line, where any

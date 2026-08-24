@@ -212,6 +212,7 @@ class Survey:
     review_scope_roadmaps: list[str] = field(default_factory=list)
     review_scope_prs: list[int] = field(default_factory=list)
     review_scope_authors: list[str] = field(default_factory=list)
+    review_scope_requested: bool = False
     review_scope_excluded: list[Candidate] = field(default_factory=list)
     review_query_scoped: bool = False
     review_query_strategy: str = "full"
@@ -382,7 +383,7 @@ def scope_review_candidates(sv: Survey, roadmaps: list[str], prs: list[int], aut
     sv.review_scope_roadmaps = list(roadmaps)
     sv.review_scope_prs = list(prs)
     sv.review_scope_authors = list(authors)
-    if not roadmaps and not prs and not authors:
+    if not roadmaps and not prs and not authors and not sv.review_scope_requested:
         return
     allowed_areas = {area.casefold() for area in roadmaps}
     allowed_prs = set(prs)
@@ -608,6 +609,7 @@ def survey(
     review_scope_prs: list[int] | tuple[int, ...] = (),
     review_scope_authors: list[str] | tuple[str, ...] = (),
     scoped_review_only: bool = False,
+    review_scope_requested: bool = False,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
@@ -622,7 +624,8 @@ def survey(
     scope_roadmaps = list(review_scope_roadmaps)
     scope_prs = list(review_scope_prs)
     scope_authors = list(review_scope_authors)
-    use_scoped_query = scoped_review_only and bool(scope_roadmaps or scope_prs or scope_authors)
+    scope_requested = review_scope_requested or bool(scope_roadmaps or scope_prs or scope_authors)
+    use_scoped_query = scoped_review_only and scope_requested
     sv = Survey(
         worker_id=cfg.wid,
         roadmap_only=("auto" if _f is None else (_f or "any")),
@@ -630,10 +633,11 @@ def survey(
         review_scope_roadmaps=scope_roadmaps,
         review_scope_prs=scope_prs,
         review_scope_authors=scope_authors,
+        review_scope_requested=scope_requested,
         review_query_scoped=use_scoped_query,
         review_query_strategy=(
             "explicit-pr"
-            if use_scoped_query and not scope_roadmaps and not scope_authors
+            if use_scoped_query and scope_prs and not scope_roadmaps and not scope_authors
             else "scope-union"
             if use_scoped_query
             else "full"

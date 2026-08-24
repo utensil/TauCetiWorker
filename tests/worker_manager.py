@@ -100,7 +100,7 @@ try:
     legacy.write_text(
         "./tauceti work --loop --worker-id worker2 --agent codex --only rebase,review "
         "--review-roadmap RepresentationTheory --review-pr 3809 --review-pr 3847,3871 "
-        "--review-author Contributor-A --review-author contributor-b,CONTRIBUTOR-A "
+        "--review-author Contributor-A --review-author contributor-b:0.3,CONTRIBUTOR-A:1.0 "
         "--ignore-quota --auto-refresh\n"
     )
     imported = wm.parse_legacy_config(legacy)
@@ -110,7 +110,7 @@ try:
     assert imported[0].auto_refresh is True
     assert imported[0].review_roadmap == ("RepresentationTheory",)
     assert imported[0].review_pr == (3809, 3847, 3871)
-    assert imported[0].review_author == ("contributor-a", "contributor-b")
+    assert imported[0].review_author == ("contributor-a", "contributor-b:0.3")
 
     # The full semantic model must remain parseable by the real work CLI.
     maximal = wm.WorkerSpec(
@@ -125,7 +125,7 @@ try:
         roadmap_extra_identities=("Maintainer",),
         review_roadmap=("ReductiveGroups", "RepresentationTheory"),
         review_pr=(3809, 3847, 3871),
-        review_author=("contributor-a", "contributor-b"),
+        review_author=("contributor-a", "contributor-b:0.3"),
         respect_claims=False,
         source="https://example.invalid/source",
         author_model="gpt-5",
@@ -139,7 +139,7 @@ try:
     assert parsed.auto_refresh is True
     assert parsed.review_roadmap == ["ReductiveGroups,RepresentationTheory"]
     assert parsed.review_pr == ["3809,3847,3871"]
-    assert parsed.review_author == ["contributor-a,contributor-b"]
+    assert parsed.review_author == ["contributor-a,contributor-b:0.3"]
     # A worker that has NOT opted in must not emit the flag: the default is to leave the operator's
     # single-use refresh token alone.
     assert "--auto-refresh" not in wm.WorkerSpec(id="plain").work_argv()
@@ -154,15 +154,15 @@ try:
             "only": ["review"],
             "review_roadmap": ["RepresentationTheory", "ReductiveGroups", "RepresentationTheory"],
             "review_pr": [3871, 3809, 3871],
-            "review_author": ["Contributor-A", "contributor-b", "CONTRIBUTOR-A"],
+            "review_author": ["Contributor-A", "contributor-b:0.3", "CONTRIBUTOR-A:1.0"],
         },
         0,
     )
     assert scoped.review_roadmap == ("ReductiveGroups", "RepresentationTheory")
     assert scoped.review_pr == (3809, 3871)
-    assert scoped.review_author == ("contributor-a", "contributor-b")
+    assert scoped.review_author == ("contributor-a", "contributor-b:0.3")
     assert scoped.as_dict()["review_pr"] == [3809, 3871]
-    assert scoped.as_dict()["review_author"] == ["contributor-a", "contributor-b"]
+    assert scoped.as_dict()["review_author"] == ["contributor-a", "contributor-b:0.3"]
     assert all(flag in scoped.work_argv() for flag in ("--review-roadmap", "--review-pr", "--review-author"))
     assert not any(
         name.startswith(("TAUCETI_REVIEW_ROADMAP", "TAUCETI_REVIEW_PR", "TAUCETI_REVIEW_AUTHOR"))
@@ -179,6 +179,9 @@ try:
         ({"review_author": ["-leading"]}, "leading hyphen author"),
         ({"review_author": ["trailing-"]}, "trailing hyphen author"),
         ({"review_author": ["x" * 40]}, "overlong author"),
+        ({"review_author": ["contributor-a:30%"]}, "percentage author probability"),
+        ({"review_author": ["contributor-a:1.1"]}, "author probability above one"),
+        ({"review_author": ["contributor-a:0.2", "CONTRIBUTOR-A:0.3"]}, "conflicting author probabilities"),
         ({"review_author": "contributor-a"}, "non-array author scope"),
     ):
         try:

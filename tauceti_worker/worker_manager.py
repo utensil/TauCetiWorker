@@ -32,6 +32,7 @@ from typing import NoReturn
 from .constants import AGENTS, ALLOWED_TASKS
 from .paths import HERE, ensure_ssl_cert_file, entry_cmd, self_argv, self_env
 from .quota import parse_pace_curve
+from .review_scope import ReviewAuthorSpecError, normalize_review_author_specs
 from .round import signal_group
 from .runtime_status import STATUS_ENV, read_json, update_status
 
@@ -208,7 +209,6 @@ _RESERVED_ENV = frozenset(
 # a name like `1A` or `A-B` can only be reached by contortion, so it is far likelier to be a typo.
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REVIEW_ROADMAP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-_REVIEW_AUTHOR = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\Z")
 
 # Aggregate cap on one worker's table. The spec reaches the runner as a single command-line argument,
 # so an unbounded table becomes E2BIG at launch; refuse it while it is still a configuration error the
@@ -264,13 +264,10 @@ def _review_prs(value, where: str) -> tuple[int, ...]:
 
 def _review_authors(value, where: str) -> tuple[str, ...]:
     values = _strings(value, where)
-    bad = next(
-        (item for item in values if len(item) > 39 or not _REVIEW_AUTHOR.fullmatch(item) or "--" in item),
-        None,
-    )
-    if bad is not None:
-        raise WorkersError(f"{where} contains an invalid GitHub login: {bad!r}")
-    return tuple(sorted({item.casefold() for item in values}))
+    try:
+        return normalize_review_author_specs(values)
+    except ReviewAuthorSpecError as exc:
+        raise WorkersError(f"{where} {exc}") from None
 
 
 @dataclasses.dataclass(frozen=True)
