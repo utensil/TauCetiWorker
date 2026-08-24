@@ -33,6 +33,7 @@ from . import (
     oauth,  # noqa: F401 — a submodule attribute, deliberately not flattened below
     paths,
     quota,
+    review_scope,
     review_state,
     round,
     runtime_status,
@@ -54,6 +55,7 @@ _MODULES = (
     config,
     github,
     quota,
+    review_scope,
     review_state,
     survey,
     round,

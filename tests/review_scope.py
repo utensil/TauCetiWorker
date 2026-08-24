@@ -111,18 +111,18 @@ try:
             "--review-pr",
             "3871,3827",
             "--review-author",
-            "Contributor-A,contributor-b",
+            "Contributor-A,contributor-b:0.3",
             "--review-author",
-            "CONTRIBUTOR-A",
+            "CONTRIBUTOR-A:1.0",
         ]
     )
     check("repeatable roadmap flag parses", args.review_roadmap, ["RepresentationTheory,ReductiveGroups"])
     check("repeatable PR flag parses", args.review_pr, ["3809", "3871,3827"])
-    check("repeatable author flag parses", args.review_author, ["Contributor-A,contributor-b", "CONTRIBUTOR-A"])
+    check("repeatable author flag parses", args.review_author, ["Contributor-A,contributor-b:0.3", "CONTRIBUTOR-A:1.0"])
     check(
         "CLI scope is normalized without Worker state",
         tc.parse_review_scope(args),
-        (["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871], ["contributor-a", "contributor-b"]),
+        (["ReductiveGroups", "RepresentationTheory"], [3809, 3827, 3871], ["contributor-a", "contributor-b:0.3"]),
     )
     check("ambient roadmap value is ignored and untouched", os.environ["TAUCETI_REVIEW_ROADMAPS"], "HiddenRoadmap")
     check("ambient PR value is ignored and untouched", os.environ["TAUCETI_REVIEW_PRS"], "999")
@@ -137,7 +137,7 @@ try:
         tc.review_scope_tail(
             ["ReductiveGroups", "RepresentationTheory"],
             [3809, 3827, 3871],
-            ["contributor-a", "contributor-b"],
+            ["contributor-a", "contributor-b:0.3"],
         ),
         [
             "--review-roadmap",
@@ -145,7 +145,7 @@ try:
             "--review-pr",
             "3809,3827,3871",
             "--review-author",
-            "contributor-a,contributor-b",
+            "contributor-a,contributor-b:0.3",
         ],
     )
 
@@ -173,6 +173,23 @@ try:
         malformed_author_rejected = False
     check("malformed author CLI fails loudly", malformed_author_rejected, True)
 
+    for value in ("contributor-a:30%", "contributor-a:1.1", "contributor-a:-0.1", "contributor-a:"):
+        try:
+            tc.parse_review_scope(SimpleNamespace(review_author=[value]))
+        except tc.Die:
+            malformed_probability_rejected = True
+        else:
+            malformed_probability_rejected = False
+        check(f"malformed author probability fails loudly ({value})", malformed_probability_rejected, True)
+
+    try:
+        tc.parse_review_scope(SimpleNamespace(review_author=["contributor-a:0.2,CONTRIBUTOR-A:0.3"]))
+    except tc.Die:
+        conflicting_probability_rejected = True
+    else:
+        conflicting_probability_rejected = False
+    check("conflicting duplicate probabilities fail loudly", conflicting_probability_rejected, True)
+
     for attr, flag in (
         ("review_roadmap", "--review-roadmap"),
         ("review_pr", "--review-pr"),
@@ -193,6 +210,25 @@ finally:
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+check(
+    "author probabilities normalize while default remains 1.0",
+    tc.normalize_review_author_specs(["Contributor-A", "contributor-b:0.30"]),
+    ("contributor-a", "contributor-b:0.3"),
+)
+check(
+    "timestamp seed includes a 0.3 author",
+    tc.sample_review_authors(["always", "sometimes:0.3"], timestamp=123),
+    (["always", "sometimes"], 123),
+)
+check(
+    "timestamp seed excludes a 0.3 author",
+    tc.sample_review_authors(["always", "sometimes:0.3"], timestamp=2),
+    (["always"], 2),
+)
+check(
+    "probability zero produces an empty final author array", tc.sample_review_authors(["never:0"], timestamp=1), ([], 1)
+)
 
 
 def raw_pr(number, *, state="OPEN", labels=(), body="", green=True, author="someone"):
@@ -301,6 +337,21 @@ try:
     check("author scope hydrates only matching authors", [n for n, _ in gh.view_calls], [6])
     check("author scope candidate set", [c.pr for c in sv.reviewable.actionable], [6])
     check("author scope strategy is observable", sv.review_query_strategy, "scope-union")
+
+    gh = FakeGH(index=[raw_pr(6, author="Contributor-A")], views={6: raw_pr(6, author="Contributor-A")})
+    sv = survey_module.survey(
+        SimpleNamespace(wid="test"),
+        gh,
+        None,
+        FakeCounters(),
+        deep=False,
+        review_scope_authors=[],
+        review_scope_requested=True,
+        scoped_review_only=True,
+    )
+    check("an empty sampled author array remains scoped", sv.review_query_scoped, True)
+    check("an empty sampled author array hydrates nothing", gh.view_calls, [])
+    check("an empty sampled author array cannot widen to upstream", [c.pr for c in sv.reviewable.actionable], [])
 
     index = [raw_pr(8, author="Contributor-A")]
     gh = FakeGH(index=index, views={8: raw_pr(8, author="someone-else")})
