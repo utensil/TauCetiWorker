@@ -57,4 +57,20 @@ It lets other agents and the dup-sweeper recognize which roadmap target this PR 
 fi
 
 echo "gh-safe-pr-create: gh pr create $*" >&2
+# Keep the normal gh URL output for the agent, while recording only the resulting PR number in the
+# host-provided per-round inbox. The inbox is a receipt consumed by the Worker host; it is not the
+# durable ownership record. A missing/failed receipt is surfaced as an error rather than silently
+# creating an unowned PR that another maintenance Worker could pick up.
+if [[ -n "${TAUCETI_PR_RECEIPT_FILE:-}" ]]; then
+    output="$(gh pr create "$@" 2>&1)"
+    rc=$?
+    printf '%s\n' "$output"
+    (( rc == 0 )) || exit "$rc"
+    url="$(grep -Eo 'https://github\.com/[^[:space:]]+/pull/[1-9][0-9]*' <<<"$output" | tail -1)"
+    [[ -n "$url" ]] || die "gh pr create succeeded but returned no PR URL; ownership was not recorded"
+    number="${url##*/}"
+    printf '%s\n' "$number" >>"$TAUCETI_PR_RECEIPT_FILE" \
+        || die "gh pr create succeeded but could not write the ownership receipt"
+    exit 0
+fi
 exec gh pr create "$@"

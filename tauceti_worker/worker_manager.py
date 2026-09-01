@@ -53,6 +53,7 @@ _WORKER_KEYS = {
     "review_roadmap",
     "review_pr",
     "review_author",
+    "tend_scope",
     "respect_claims",
     "source",
     "author_model",
@@ -202,7 +203,15 @@ def _pace(value, where: str) -> str | None:
 # isolate_home() reads it as an "isolation completed" sentinel, so presetting it would silently skip
 # credential isolation and run the worker on the operator's own account.
 _RESERVED_ENV = frozenset(
-    {STATUS_ENV, "TAUCETI_MANAGED", "TAUCETI_LOG_FILE", "TAUCETI_PARENT_PIPE_FD", "TAUCETI_DATA_HOME"}
+    {
+        STATUS_ENV,
+        "TAUCETI_MANAGED",
+        "TAUCETI_LOG_FILE",
+        "TAUCETI_PARENT_PIPE_FD",
+        "TAUCETI_DATA_HOME",
+        "TAUCETI_TEND_SCOPE",
+        "TAUCETI_PR_RECEIPT_FILE",
+    }
 )
 
 # A POSIX-portable variable name, which is also what a shell can refer to. `execve` accepts more, but
@@ -285,6 +294,7 @@ class WorkerSpec:
     review_roadmap: tuple[str, ...] = ()
     review_pr: tuple[int, ...] = ()
     review_author: tuple[str, ...] = ()
+    tend_scope: str = "author"
     respect_claims: bool = True
     source: str | None = None
     author_model: str | None = None
@@ -338,6 +348,7 @@ class WorkerSpec:
             review_roadmap=_review_roadmaps(raw.get("review_roadmap", []), f"workers[{index}].review_roadmap"),
             review_pr=_review_prs(raw.get("review_pr", []), f"workers[{index}].review_pr"),
             review_author=_review_authors(raw.get("review_author", []), f"workers[{index}].review_author"),
+            tend_scope=_string(raw.get("tend_scope", "author"), f"workers[{index}].tend_scope"),
             respect_claims=_boolean(raw.get("respect_claims", True), f"workers[{index}].respect_claims"),
             source=_string(raw.get("source"), f"workers[{index}].source", optional=True),
             author_model=_string(raw.get("author_model"), f"workers[{index}].author_model", optional=True),
@@ -348,6 +359,8 @@ class WorkerSpec:
             restart=restart,
             env=_env_pairs(raw.get("env", {}), f"workers[{index}].env"),
         )
+        if spec.tend_scope not in ("author", "owned"):
+            raise WorkersError(f"workers[{index}].tend_scope must be 'author' or 'owned'")
         if spec.source is not None and ("roadmap" not in spec.only or not spec.roadmap_only):
             raise WorkersError(f"workers[{index}].source requires only to include roadmap and a non-empty roadmap_only")
         if (spec.author_model or spec.author_effort) and spec.agent == "auto":
@@ -378,6 +391,8 @@ class WorkerSpec:
             value["review_pr"] = list(self.review_pr)
         if self.review_author:
             value["review_author"] = list(self.review_author)
+        if self.tend_scope != "author":
+            value["tend_scope"] = self.tend_scope
         if not self.respect_claims:
             value["respect_claims"] = False
         for name in ("source", "author_model", "author_effort", "pace"):
@@ -424,6 +439,8 @@ class WorkerSpec:
             argv += ["--review-pr", ",".join(str(pr) for pr in self.review_pr)]
         if self.review_author:
             argv += ["--review-author", ",".join(self.review_author)]
+        if self.tend_scope != "author":
+            argv += ["--tend-scope", self.tend_scope]
         if not self.respect_claims:
             argv.append("--ignore-claims")
         for field, flag in (
@@ -1214,6 +1231,8 @@ def _worker_configuration_lines(item: dict, width: int) -> list[str]:
     agent = str(spec.get("agent") or item.get("agent") or "auto")
     sandbox = str(spec.get("sandbox") or item.get("sandbox") or "host")
     lines.extend(_status_field("agent", [f"{agent} · {sandbox} sandbox"], width))
+    if str(spec.get("tend_scope") or "author") != "author":
+        lines.extend(_status_field("maintenance", ["owned PR scope"], width))
 
     pacing = "ignored (--ignore-quota; hard limits still apply)" if spec.get("ignore_quota") else "normal"
     if spec.get("pace"):
@@ -1685,6 +1704,7 @@ def parse_legacy_config(path: Path) -> list[WorkerSpec]:
                 "--review-roadmap": "review_roadmap",
                 "--review-pr": "review_pr",
                 "--review-author": "review_author",
+                "--tend-scope": "tend_scope",
                 "--source": "source",
                 "--author-model": "author_model",
                 "--author-effort": "author_effort",
@@ -1767,6 +1787,12 @@ def add_workers_parser(subparsers) -> None:
     )
     add.add_argument("--roadmap-only", help="pin roadmap rounds to one area")
     add.add_argument("--roadmap-skip", default="", help="comma-separated roadmap areas to exclude")
+    add.add_argument(
+        "--tend-scope",
+        choices=("author", "owned"),
+        default="author",
+        help="maintenance scope: author-wide (default) or this worker's recorded PRs only",
+    )
     add.add_argument("--source", help="source repository; requires roadmap in --only and one pinned roadmap area")
     add.add_argument("--author-model", help="exact authoring model; needs an explicit --agent")
     add.add_argument("--author-effort", help="reasoning effort for an explicit codex/claude/kiro agent")
@@ -1851,6 +1877,7 @@ def cmd_workers(args) -> int:
                     "ignore_quota": args.ignore_quota,
                     "auto_refresh": args.auto_refresh,
                     "roadmap_skip": [item for item in args.roadmap_skip.split(",") if item],
+                    "tend_scope": args.tend_scope,
                     "stream": args.stream,
                     "isolate_home": args.isolate_home,
                 }

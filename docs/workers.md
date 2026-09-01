@@ -110,6 +110,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `review_roadmap` | string list | `[]` | Roadmap labels admitted to review, forwarded only as `--review-roadmap` CLI arguments |
 | `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
 | `review_author` | string list | `[]` | GitHub authors as `login` or `login:decimal-probability` (default `1.0`), sampled once per round and then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
+| `tend_scope` | string | `"author"` | Maintenance PR scope: `author` preserves legacy author-wide tending; `owned` tends only PR numbers recorded for this worker id |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
 | `source` | string | unset | Supplementary repository directory or URL. Requires `roadmap` in `only` and a non-empty `roadmap_only` |
 | `author_model` | string | unset | Exact authoring model. Requires an `agent` other than `auto` |
@@ -118,7 +119,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `stream` | bool | `false` | Keep the agent transcript in the console log instead of a separate file |
 | `isolate_home` | bool | `false` | Force credential isolation for the id `default`; every other id already enables it |
 | `restart` | string | `"always"` | `always` after any exit, `on-failure` after a nonzero exit, or `never`; explicit restart and re-enable still work |
-| `env` | table of strings | `{}` | Extra environment for this worker's process tree, for settings with no flag of their own. Values must be quoted strings, names POSIX-portable, and the table at most 16 KB. The variables the worker sets itself (`TAUCETI_MANAGED`, `TAUCETI_LOG_FILE`, `TAUCETI_PARENT_PIPE_FD`, `TAUCETI_DATA_HOME`, and the runtime-status path) are rejected. **Not a secret store** — see below |
+| `env` | table of strings | `{}` | Extra environment for this worker's process tree, for settings with no flag of their own. Values must be quoted strings, names POSIX-portable, and the table at most 16 KB. The variables the worker sets itself (`TAUCETI_MANAGED`, `TAUCETI_LOG_FILE`, `TAUCETI_PARENT_PIPE_FD`, `TAUCETI_DATA_HOME`, `TAUCETI_TEND_SCOPE`, `TAUCETI_PR_RECEIPT_FILE`, and the runtime-status path) are rejected. **Not a secret store** — see below |
 
 The manager fingerprints each definition. It stops a worker when `enabled`
 becomes false and restarts an enabled worker when any other field changes,
@@ -140,6 +141,18 @@ private.
 Author probabilities are decimal values from `0.0` through `1.0`, not
 percentages. Each round uses a timestamp seed to compute the final allowed-author
 array before the existing roadmap OR explicit-PR OR author union is applied.
+
+### Owned maintenance scope
+
+Set `tend_scope = "owned"` for every non-review maintenance Worker that shares a
+GitHub identity with another Worker. Rebase, fix-CI, fix, and bump then consider
+only PR numbers recorded for that Worker ID. The record lives at
+`$TAUCETI_INSTANCES_DIR/<worker-id>/owned-prs`, or by default
+`~/.tauceti/instances/<worker-id>/owned-prs`; it is one strict comma-separated
+line of positive PR numbers. Roadmap PR creation records its number through the
+sanctioned `gh-safe-pr-create` wrapper and atomically updates the file. Missing,
+malformed, or duplicate state fails closed to an empty maintenance queue; it is
+never treated as author-wide scope. The state contains no branch, head, or account metadata.
 
 Put no secrets in it. The values are stored in plain `workers.toml`, and the
 whole worker definition is handed to its runner on a command line, where any
@@ -180,6 +193,7 @@ entry with `enabled = true`.
 | `--auto-refresh` | `auto_refresh` |
 | `--roadmap-only AREA` | `roadmap_only` |
 | `--roadmap-skip AREAS` | `roadmap_skip`, as a comma-separated list |
+| `--tend-scope {author,owned}` | `tend_scope` |
 | `--source PATH_OR_URL` | `source`; also requires `roadmap` in `--only` and a non-empty `--roadmap-only` |
 | `--author-model MODEL` | `author_model` |
 | `--author-effort EFFORT` | `author_effort`; Codex, Claude, or Kiro only |

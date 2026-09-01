@@ -124,6 +124,7 @@ tauceti work --loop --only review --review-roadmap RepresentationTheory
 tauceti work --loop --only review --review-roadmap RepresentationTheory --review-pr 3839,3859
 tauceti work --loop --only review --review-author contributor-a,occasional-reviewer:0.3
 tauceti work --loop --only fix,fix-ci # only tend to our own PRs
+tauceti work --loop --tend-scope owned  # only tend PRs this worker instance created
 tauceti work --loop --skip roadmap    # everything except authoring new PRs
 ```
 

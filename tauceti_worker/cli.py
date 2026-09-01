@@ -110,6 +110,7 @@ multiple workers (share a host and coordinate through GitHub; a distinct id name
 
 environment (flags win; full reference linked below):
   TAUCETI_AGENT          default for --agent
+  TAUCETI_TEND_SCOPE     maintenance scope: author (legacy) or owned (this worker's PRs only)
   TAUCETI_WORKER_ID      pins the worker id (else `work` auto-assigns worker1, worker2, ...)
   TAUCETI_ROADMAP_ONLY   single roadmap area (unset = a fresh random area each round; "" = all areas)
   TAUCETI_ROADMAP_SKIP   comma-separated roadmap areas to exclude from selection
@@ -177,6 +178,13 @@ def add_work_flags(p: argparse.ArgumentParser) -> None:
         help="restrict the round to these work units, a comma list of: "
         + ", ".join(ALLOWED_TASKS)
         + " (default: walk the whole cascade)",
+    )
+    p.add_argument(
+        "--tend-scope",
+        choices=("author", "owned"),
+        default=None,
+        help="maintenance PR scope: author-wide (default) or only PRs recorded for this worker id "
+        "(owned; fail-closed when the local record is absent or invalid)",
     )
     p.add_argument(
         "--skip",
@@ -728,6 +736,7 @@ def cmd_status(args) -> int:
         review_scope_prs=review_scope_prs,
         review_scope_authors=review_scope_authors,
         review_scope_requested=review_scope_requested,
+        tend_scope=getattr(args, "tend_scope", None),
     )
     _, quota_snap = Quota(cfg).choose(None)
 
@@ -751,6 +760,10 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             "Pass --bubble to run inside the sandbox instead"
         )
     review_scope_roadmaps, review_scope_prs, review_scope_authors = parse_review_scope(args)
+    tend_scope = getattr(args, "tend_scope", None) or os.environ.get("TAUCETI_TEND_SCOPE", "author")
+    if tend_scope not in ("author", "owned"):
+        raise Die("--tend-scope must be 'author' or 'owned'")
+    os.environ["TAUCETI_TEND_SCOPE"] = tend_scope
     author_model = getattr(args, "author_model", None)
     author_effort = getattr(args, "author_effort", None)
     resolved_author_fallback_model = getattr(args, "resolved_author_fallback_model", None)
@@ -929,6 +942,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             review_scope_prs=review_scope_prs,
             review_scope_authors=review_scope_authors,
             review_scope_requested=review_scope_requested,
+            tend_scope=tend_scope,
         )
         # Before preflight, and NOT gated on --dry-run: --dry-run is how an operator checks their setup,
         # so it is the one run that most needs to answer "am I on the right account?". The check is a

@@ -4,6 +4,7 @@ picker, `status`, and the TUI all consume."""
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import subprocess
@@ -39,6 +40,7 @@ from .constants import (
     TAUCETI_OWNER,
 )
 from .github import GitHub, GitHubError, _parse_iso8601, can_push, me
+from .owned_prs import OwnedPRs
 from .review_state import Meta, ReviewState
 
 # ============================================================================
@@ -222,6 +224,8 @@ class Survey:
     progress: WorkKind = field(default_factory=lambda: WorkKind("progress"))  # a roadmap report is due
     roadmap_only: str = ""
     roadmap_skip: list[str] = field(default_factory=list)
+    tend_scope: str = "author"
+    owned_prs: list[int] | None = None
     # This is deliberately scoped by roadmap_only/roadmap_skip: authoring backpressure in a focused
     # run is the number of our open, non-draft roadmap PRs that belong to that run's selected areas,
     # not the number of every PR we have open across the project.
@@ -610,6 +614,7 @@ def survey(
     review_scope_authors: list[str] | tuple[str, ...] = (),
     scoped_review_only: bool = False,
     review_scope_requested: bool = False,
+    tend_scope: str | None = None,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
@@ -625,6 +630,9 @@ def survey(
     scope_prs = list(review_scope_prs)
     scope_authors = list(review_scope_authors)
     scope_requested = review_scope_requested or bool(scope_roadmaps or scope_prs or scope_authors)
+    tend_scope = tend_scope or os.environ.get("TAUCETI_TEND_SCOPE", "author")
+    if tend_scope not in ("author", "owned"):
+        raise ValueError(f"invalid tend scope: {tend_scope!r}")
     use_scoped_query = scoped_review_only and scope_requested
     sv = Survey(
         worker_id=cfg.wid,
@@ -634,6 +642,7 @@ def survey(
         review_scope_prs=scope_prs,
         review_scope_authors=scope_authors,
         review_scope_requested=scope_requested,
+        tend_scope=tend_scope,
         review_query_scoped=use_scoped_query,
         review_query_strategy=(
             "explicit-pr"
@@ -657,14 +666,24 @@ def survey(
     sv.open_prs = prs
     nondraft = [p for p in prs if not p.is_draft]
     me_login = me()
+    owned: set[int] | None = None
+    if tend_scope == "owned":
+        owned = OwnedPRs(cfg).read()
+        sv.owned_prs = sorted(owned) if owned is not None else None
     mine = [p for p in nondraft if p.author == me_login]
     # Tend our own PRs, plus bot PRs hosted on canonical when this identity can push there. Only query
     # that permission while such a bot PR is open; an unknown result skips optional bot work this round.
     bot_on_canonical = any(p.author_is_bot and p.head_owner == TAUCETI_OWNER for p in nondraft)
     tend_bot = bot_on_canonical and can_push(TAUCETI) is True
-    tended = [
-        p for p in nondraft if p.author == me_login or (tend_bot and p.author_is_bot and p.head_owner == TAUCETI_OWNER)
-    ]
+    if tend_scope == "owned":
+        tended = [p for p in nondraft if owned is not None and p.number in owned]
+        mine = [p for p in mine if owned is not None and p.number in owned]
+    else:
+        tended = [
+            p
+            for p in nondraft
+            if p.author == me_login or (tend_bot and p.author_is_bot and p.head_owner == TAUCETI_OWNER)
+        ]
     sv.n_open_nondraft = len(nondraft)
     sv.n_reviewable = sum(1 for p in nondraft if p.build_success)
     sv._mine_open_prs = mine
