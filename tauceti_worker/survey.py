@@ -680,7 +680,9 @@ def survey(
         mine = [p for p in mine if owned is not None and p.number in owned]
     else:
         tended = [
-            p for p in nondraft if p.author == me_login or (tend_bot and p.author_is_bot and p.head_owner == TAUCETI_OWNER)
+            p
+            for p in nondraft
+            if p.author == me_login or (tend_bot and p.author_is_bot and p.head_owner == TAUCETI_OWNER)
         ]
     sv.n_open_nondraft = len(nondraft)
     sv.n_reviewable = sum(1 for p in nondraft if p.build_success)

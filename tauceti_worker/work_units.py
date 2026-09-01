@@ -233,8 +233,14 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
     label = "scoped open PRs" if sv.review_query_scoped else "open PRs"
     log(f"{label}: {sv.status_label_line()}")
     if sv.tend_scope == "owned":
-        detail = "missing or unreadable ownership record" if sv.owned_prs is None else f"{len(sv.owned_prs)} recorded PR(s)"
-        log(f"maintenance scope: owned ({detail}; maintenance is fail-closed)" if sv.owned_prs is None else f"maintenance scope: owned ({detail})")
+        detail = (
+            "missing or unreadable ownership record" if sv.owned_prs is None else f"{len(sv.owned_prs)} recorded PR(s)"
+        )
+        log(
+            f"maintenance scope: owned ({detail}; maintenance is fail-closed)"
+            if sv.owned_prs is None
+            else f"maintenance scope: owned ({detail})"
+        )
     if sv.review_scope_requested:
         areas = ",".join(sv.review_scope_roadmaps) or "none"
         prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"
@@ -1361,7 +1367,9 @@ def do_roadmap(w, sv, c, opts, bubble) -> int:
                 WORKERID=w.cfg.wid,
                 ROADMAP_DIR=str(refs / "roadmap" / "TauCetiRoadmap"),
                 REVIEW_DIR=str(refs / "review"),
-                RUBRICS=(str(bundle) if bundle is not None else f"{refs / 'review' / 'rubrics'} (read every .md file in it)"),
+                RUBRICS=(
+                    str(bundle) if bundle is not None else f"{refs / 'review' / 'rubrics'} (read every .md file in it)"
+                ),
                 SOURCE_GUIDANCE=source_guidance,
                 BIN=wrapper_bin(),
             )
