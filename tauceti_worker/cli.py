@@ -54,7 +54,17 @@ from .config import (
     set_log_file,
     warn_red,
 )
-from .constants import AGENTS, ALLOWED_TASKS, CLAIMS, EX_NOPROGRESS, OPENROUTER_MODELS, TAUCETI, WORK_TASKS
+from .constants import (
+    AGENTS,
+    ALLOWED_TASKS,
+    CLAIMS,
+    EX_NOPROGRESS,
+    MAX_OPEN_PRS,
+    OPENROUTER_MODELS,
+    TAUCETI,
+    WORK_TASKS,
+    validate_max_open_prs,
+)
 from .github import GitHub, shared_claims_granted
 from .loop import cmd_loop, resolve_work_model
 from .paths import HERE, ensure_ssl_cert_file
@@ -185,6 +195,13 @@ def add_work_flags(p: argparse.ArgumentParser) -> None:
         default=None,
         help="maintenance PR scope: author-wide (default) or only PRs recorded for this worker id "
         "(owned; fail-closed when the local record is absent or invalid)",
+    )
+    p.add_argument(
+        "--max-open-prs",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"roadmap authoring backpressure for this worker (default: {MAX_OPEN_PRS}; positive integer)",
     )
     p.add_argument(
         "--skip",
@@ -516,6 +533,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="read-only survey of available work + quota")
     s.add_argument("--json", action="store_true", help="emit the survey as JSON")
     s.add_argument("--worker-id", dest="worker_id", default=None)
+    s.add_argument(
+        "--max-open-prs",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"roadmap authoring backpressure for this worker (default: {MAX_OPEN_PRS})",
+    )
     add_review_scope_flags(s)
 
     u = sub.add_parser("usage", help="read Kiro/OpenRouter credits without sending a model prompt")
@@ -713,6 +737,18 @@ def cmd_usage(args) -> int:
     return 0 if all(v.get("ok") for v in snap.values()) else 1
 
 
+def resolve_max_open_prs(args) -> int:
+    """Resolve and validate the per-worker roadmap backpressure limit."""
+    value = getattr(args, "max_open_prs", None)
+    if value is None:
+        value = MAX_OPEN_PRS
+    try:
+        value = int(value)
+        return validate_max_open_prs(value)
+    except (TypeError, ValueError) as exc:
+        raise Die(f"--max-open-prs/$TAUCETI_MAX_OPEN_PRS must be a positive integer: {value!r}") from exc
+
+
 def cmd_status(args) -> int:
     review_scope_roadmaps, review_scope_prs, review_scope_author_specs = parse_review_scope(args)
     review_scope_authors, author_seed = sample_review_authors(review_scope_author_specs)
@@ -726,6 +762,7 @@ def cmd_status(args) -> int:
     gh = GitHub()
     rs = ReviewState(cfg, gh)
     counters = Counters(cfg)
+    max_open_prs = resolve_max_open_prs(args)
     sv = survey(
         cfg,
         gh,
@@ -737,6 +774,7 @@ def cmd_status(args) -> int:
         review_scope_authors=review_scope_authors,
         review_scope_requested=review_scope_requested,
         tend_scope=getattr(args, "tend_scope", None),
+        max_open_prs=max_open_prs,
     )
     _, quota_snap = Quota(cfg).choose(None)
 
@@ -764,6 +802,10 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
     if tend_scope not in ("author", "owned"):
         raise Die("--tend-scope must be 'author' or 'owned'")
     os.environ["TAUCETI_TEND_SCOPE"] = tend_scope
+    max_open_prs = resolve_max_open_prs(args)
+    # Keep the cap process-local and explicit; unlike the older tend-scope setting it must not bleed
+    # through a shell-wide environment variable into another worker instance.
+    args.max_open_prs = max_open_prs
     author_model = getattr(args, "author_model", None)
     author_effort = getattr(args, "author_effort", None)
     resolved_author_fallback_model = getattr(args, "resolved_author_fallback_model", None)
@@ -943,6 +985,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             review_scope_authors=review_scope_authors,
             review_scope_requested=review_scope_requested,
             tend_scope=tend_scope,
+            max_open_prs=max_open_prs,
         )
         # Before preflight, and NOT gated on --dry-run: --dry-run is how an operator checks their setup,
         # so it is the one run that most needs to answer "am I on the right account?". The check is a

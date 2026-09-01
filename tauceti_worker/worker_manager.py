@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from typing import NoReturn
 
-from .constants import AGENTS, ALLOWED_TASKS
+from .constants import AGENTS, ALLOWED_TASKS, MAX_OPEN_PRS, validate_max_open_prs
 from .paths import HERE, ensure_ssl_cert_file, entry_cmd, self_argv, self_env
 from .quota import parse_pace_curve
 from .review_scope import ReviewAuthorSpecError, normalize_review_author_specs
@@ -54,6 +54,7 @@ _WORKER_KEYS = {
     "review_pr",
     "review_author",
     "tend_scope",
+    "max_open_prs",
     "respect_claims",
     "source",
     "author_model",
@@ -177,6 +178,17 @@ def _boolean(value, where: str) -> bool:
     return value
 
 
+def _positive_int(value, where: str, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WorkersError(f"{where} must be a positive integer")
+    try:
+        return validate_max_open_prs(value)
+    except ValueError:
+        raise WorkersError(f"{where} must be a positive integer") from None
+
+
 def _strings(value, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise WorkersError(f"{where} must be an array of strings")
@@ -295,6 +307,7 @@ class WorkerSpec:
     review_pr: tuple[int, ...] = ()
     review_author: tuple[str, ...] = ()
     tend_scope: str = "author"
+    max_open_prs: int = MAX_OPEN_PRS
     respect_claims: bool = True
     source: str | None = None
     author_model: str | None = None
@@ -349,6 +362,7 @@ class WorkerSpec:
             review_pr=_review_prs(raw.get("review_pr", []), f"workers[{index}].review_pr"),
             review_author=_review_authors(raw.get("review_author", []), f"workers[{index}].review_author"),
             tend_scope=_string(raw.get("tend_scope", "author"), f"workers[{index}].tend_scope"),
+            max_open_prs=_positive_int(raw.get("max_open_prs"), f"workers[{index}].max_open_prs", default=MAX_OPEN_PRS),
             respect_claims=_boolean(raw.get("respect_claims", True), f"workers[{index}].respect_claims"),
             source=_string(raw.get("source"), f"workers[{index}].source", optional=True),
             author_model=_string(raw.get("author_model"), f"workers[{index}].author_model", optional=True),
@@ -393,6 +407,8 @@ class WorkerSpec:
             value["review_author"] = list(self.review_author)
         if self.tend_scope != "author":
             value["tend_scope"] = self.tend_scope
+        if self.max_open_prs != MAX_OPEN_PRS:
+            value["max_open_prs"] = self.max_open_prs
         if not self.respect_claims:
             value["respect_claims"] = False
         for name in ("source", "author_model", "author_effort", "pace"):
@@ -441,6 +457,8 @@ class WorkerSpec:
             argv += ["--review-author", ",".join(self.review_author)]
         if self.tend_scope != "author":
             argv += ["--tend-scope", self.tend_scope]
+        if self.max_open_prs != MAX_OPEN_PRS:
+            argv += ["--max-open-prs", str(self.max_open_prs)]
         if not self.respect_claims:
             argv.append("--ignore-claims")
         for field, flag in (
@@ -1705,6 +1723,7 @@ def parse_legacy_config(path: Path) -> list[WorkerSpec]:
                 "--review-pr": "review_pr",
                 "--review-author": "review_author",
                 "--tend-scope": "tend_scope",
+                "--max-open-prs": "max_open_prs",
                 "--source": "source",
                 "--author-model": "author_model",
                 "--author-effort": "author_effort",
@@ -1793,6 +1812,13 @@ def add_workers_parser(subparsers) -> None:
         default="author",
         help="maintenance scope: author-wide (default) or this worker's recorded PRs only",
     )
+    add.add_argument(
+        "--max-open-prs",
+        type=int,
+        default=MAX_OPEN_PRS,
+        metavar="N",
+        help=f"roadmap authoring backpressure for this worker (default: {MAX_OPEN_PRS})",
+    )
     add.add_argument("--source", help="source repository; requires roadmap in --only and one pinned roadmap area")
     add.add_argument("--author-model", help="exact authoring model; needs an explicit --agent")
     add.add_argument("--author-effort", help="reasoning effort for an explicit codex/claude/kiro agent")
@@ -1878,6 +1904,7 @@ def cmd_workers(args) -> int:
                     "auto_refresh": args.auto_refresh,
                     "roadmap_skip": [item for item in args.roadmap_skip.split(",") if item],
                     "tend_scope": args.tend_scope,
+                    "max_open_prs": args.max_open_prs,
                     "stream": args.stream,
                     "isolate_home": args.isolate_home,
                 }

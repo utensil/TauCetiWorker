@@ -217,6 +217,9 @@ def cmd_loop(
             tail = ["--worker-id", cfg.wid]
             tend_scope = getattr(args, "tend_scope", None) or os.environ.get("TAUCETI_TEND_SCOPE", "author")
             tail += ["--tend-scope", tend_scope]
+            max_open_prs = getattr(args, "max_open_prs", None)
+            if max_open_prs is not None:
+                tail += ["--max-open-prs", str(max_open_prs)]
             tail += review_scope_tail(review_scope_roadmaps, review_scope_prs, review_scope_authors)
             if only:
                 tail += ["--only", ",".join(only)]

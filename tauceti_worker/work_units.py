@@ -117,6 +117,7 @@ class RoundOpts:
     review_scope_authors: list[str] = field(default_factory=list)
     review_scope_requested: bool = False
     tend_scope: str = "author"
+    max_open_prs: int = MAX_OPEN_PRS
 
     @property
     def agent_name(self) -> str:
@@ -225,6 +226,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         review_scope_requested=getattr(opts, "review_scope_requested", False),
         scoped_review_only=set(opts.only) == {"review"},
         tend_scope=getattr(opts, "tend_scope", None),
+        max_open_prs=getattr(opts, "max_open_prs", None),
     )
     if sv.github_failed:
         detail = " ".join((sv.errors[0] if sv.errors else "GitHub survey failed").split())[:500]
@@ -316,7 +318,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         if sv.roadmap_backpressure:
             raise NoProgress(
                 f"roadmap: {sv.n_mine_open} open PRs in selected scope "
-                f"(>= {MAX_OPEN_PRS}) — backpressure, not authoring"
+                f"(>= {sv.max_open_prs}) — backpressure, not authoring"
             )
         rc = dispatch("roadmap", w, sv, Candidate(0, "", sv.roadmap_only), opts)
         if rc is not None:
