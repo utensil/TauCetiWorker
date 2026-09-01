@@ -38,6 +38,7 @@ from .constants import (
     STATUS_LABELS,
     TAUCETI,
     TAUCETI_OWNER,
+    validate_max_open_prs,
 )
 from .github import GitHub, GitHubError, _parse_iso8601, can_push, me
 from .owned_prs import OwnedPRs
@@ -225,6 +226,7 @@ class Survey:
     roadmap_only: str = ""
     roadmap_skip: list[str] = field(default_factory=list)
     tend_scope: str = "author"
+    max_open_prs: int = MAX_OPEN_PRS
     owned_prs: list[int] | None = None
     # This is deliberately scoped by roadmap_only/roadmap_skip: authoring backpressure in a focused
     # run is the number of our open, non-draft roadmap PRs that belong to that run's selected areas,
@@ -272,7 +274,7 @@ class Survey:
     def rescope_roadmap(self) -> None:
         """Recompute authoring pressure after roadmap-only/skip changes, including live TUI dials."""
         self.n_mine_open = roadmap_open_count(self._mine_open_prs, self.roadmap_only, self.roadmap_skip)
-        self.roadmap_backpressure = self.n_mine_open >= MAX_OPEN_PRS
+        self.roadmap_backpressure = self.n_mine_open >= self.max_open_prs
         self.next_auto_stage = _next_auto_stage(self)
 
     def status_label_line(self) -> str:
@@ -615,6 +617,7 @@ def survey(
     scoped_review_only: bool = False,
     review_scope_requested: bool = False,
     tend_scope: str | None = None,
+    max_open_prs: int | None = None,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
@@ -633,6 +636,9 @@ def survey(
     tend_scope = tend_scope or os.environ.get("TAUCETI_TEND_SCOPE", "author")
     if tend_scope not in ("author", "owned"):
         raise ValueError(f"invalid tend scope: {tend_scope!r}")
+    if max_open_prs is None:
+        max_open_prs = MAX_OPEN_PRS
+    max_open_prs = validate_max_open_prs(max_open_prs)
     use_scoped_query = scoped_review_only and scope_requested
     sv = Survey(
         worker_id=cfg.wid,
@@ -643,6 +649,7 @@ def survey(
         review_scope_authors=scope_authors,
         review_scope_requested=scope_requested,
         tend_scope=tend_scope,
+        max_open_prs=max_open_prs,
         review_query_scoped=use_scoped_query,
         review_query_strategy=(
             "explicit-pr"

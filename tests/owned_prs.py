@@ -66,6 +66,8 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     sv = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned")
     check("owned survey tends only recorded PRs", [c.pr for c in sv.rebaseable.actionable] == [3])
     check("owned survey backpressure counts only owned PRs", sv.n_mine_open == 1)
+    sv_cap = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned", max_open_prs=1)
+    check("owned survey uses its worker-local cap", sv_cap.roadmap_backpressure)
 
     receipt = root / "receipt"
     receipt.write_text("21\n")
@@ -76,6 +78,10 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
 spec = manager_mod.WorkerSpec.from_dict({"id": "tcwork", "tend_scope": "owned"}, 0)
 check("manager persists owned scope", spec.as_dict().get("tend_scope") == "owned")
 check("manager forwards owned scope", spec.work_argv()[-2:] == ["--tend-scope", "owned"])
+scoped_cap = manager_mod.WorkerSpec.from_dict({"id": "tcwork", "tend_scope": "owned", "max_open_prs": 4}, 0)
+check("manager persists per-worker cap", scoped_cap.as_dict().get("max_open_prs") == 4)
+check("manager forwards per-worker cap", "--max-open-prs" in scoped_cap.work_argv())
+check("other workers retain default cap", manager_mod.WorkerSpec(id="other").max_open_prs == 8)
 
 print(f"owned_prs: {fails} failure(s)")
 raise SystemExit(1 if fails else 0)

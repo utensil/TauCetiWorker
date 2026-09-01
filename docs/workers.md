@@ -111,6 +111,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
 | `review_author` | string list | `[]` | GitHub authors as `login` or `login:decimal-probability` (default `1.0`), sampled once per round and then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
 | `tend_scope` | string | `"author"` | Maintenance PR scope: `author` preserves legacy author-wide tending; `owned` tends only PR numbers recorded for this worker id |
+| `max_open_prs` | positive integer | `8` | Roadmap authoring backpressure for this worker only; changing it does not affect other workers |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
 | `source` | string | unset | Supplementary repository directory or URL. Requires `roadmap` in `only` and a non-empty `roadmap_only` |
 | `author_model` | string | unset | Exact authoring model. Requires an `agent` other than `auto` |
@@ -194,6 +195,7 @@ entry with `enabled = true`.
 | `--roadmap-only AREA` | `roadmap_only` |
 | `--roadmap-skip AREAS` | `roadmap_skip`, as a comma-separated list |
 | `--tend-scope {author,owned}` | `tend_scope` |
+| `--max-open-prs N` | `max_open_prs` |
 | `--source PATH_OR_URL` | `source`; also requires `roadmap` in `--only` and a non-empty `--roadmap-only` |
 | `--author-model MODEL` | `author_model` |
 | `--author-effort EFFORT` | `author_effort`; Codex, Claude, or Kiro only |

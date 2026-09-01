@@ -98,6 +98,14 @@ BUMP_HEAD_PREFIX = "bump-mathlib/"  # branch prefix the review bot opens its mat
 # are open.
 MAX_OPEN_PRS = 8
 
+
+def validate_max_open_prs(value: int) -> int:
+    """Validate the per-worker open-PR backpressure limit."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("max_open_prs must be a positive integer")
+    return value
+
+
 # The status labels TauCeti's CI keeps on every open PR to track where it sits in the review pipeline.
 # The survey counts open PRs into these buckets for the per-round "open PRs" line, in lifecycle order
 # (a PR climbs CI -> review -> author fixes -> merge). `ci-failed` and `awaiting-author` are both
