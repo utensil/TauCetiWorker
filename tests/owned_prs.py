@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Local ownership record and owned-only survey boundary tests."""
+
+import importlib
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from tauceti_worker.owned_prs import OwnedPRs
+
+survey_mod = importlib.import_module("tauceti_worker.survey")
+work_units_mod = importlib.import_module("tauceti_worker.work_units")
+manager_mod = importlib.import_module("tauceti_worker.worker_manager")
+
+
+fails = 0
+
+
+def check(name, value):
+    global fails
+    if not value:
+        fails += 1
+    print(f"[{'OK ' if value else 'BAD'}] {name}")
+
+
+with TemporaryDirectory(prefix="owned-prs-") as raw:
+    root = Path(raw)
+    cfg = SimpleNamespace(wid="tcwork", data_home=root / "home")
+    owned = OwnedPRs(cfg)
+    check("missing record fails closed", owned.read() is None)
+    check("first add creates one-line record", owned.add(12) == {12})
+    check("record is sorted comma-separated", owned.path.read_text() == "12\n")
+    check("duplicate add is idempotent", owned.add(12) == {12} and owned.path.read_text() == "12\n")
+    check("second number is sorted", owned.add(3) == {3, 12} and owned.path.read_text() == "3,12\n")
+    owned.path.write_text("3,3\n")
+    check("duplicate on disk fails closed", owned.read() is None)
+    owned.path.write_text("3, 12\n")
+    check("whitespace corruption fails closed", owned.read() is None)
+    owned.path.write_text("\n")
+    check("empty line is a valid empty set", owned.read() == set())
+
+    def pr(number):
+        return {
+            "number": number,
+            "title": f"PR {number}",
+            "body": "",
+            "headRefOid": f"head-{number}",
+            "headRefName": f"roadmap/item-{number}",
+            "headRepositoryOwner": {"login": "alice"},
+            "headRepository": {"name": "TauCeti"},
+            "isDraft": False,
+            "statusCheckRollup": [],
+            "author": {"login": "alice"},
+            "mergeable": "CONFLICTING" if number == 3 else "MERGEABLE",
+            "labels": [],
+        }
+
+    owned.path.write_text("3\n")
+    survey_mod.me = lambda: "alice"
+    gh = SimpleNamespace(pr_list=lambda fields: [pr(3), pr(4)])
+    counters = SimpleNamespace(read=lambda name: 0)
+    sv = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned")
+    check("owned survey tends only recorded PRs", [c.pr for c in sv.rebaseable.actionable] == [3])
+    check("owned survey backpressure counts only owned PRs", sv.n_mine_open == 1)
+
+    receipt = root / "receipt"
+    receipt.write_text("21\n")
+    work_units_mod._register_owned_receipt(cfg, receipt)
+    check("creation receipt is persisted as owned PR", OwnedPRs(cfg).read() == {3, 21})
+    check("consumed receipt is removed", not receipt.exists())
+
+spec = manager_mod.WorkerSpec.from_dict({"id": "tcwork", "tend_scope": "owned"}, 0)
+check("manager persists owned scope", spec.as_dict().get("tend_scope") == "owned")
+check("manager forwards owned scope", spec.work_argv()[-2:] == ["--tend-scope", "owned"])
+
+print(f"owned_prs: {fails} failure(s)")
+raise SystemExit(1 if fails else 0)

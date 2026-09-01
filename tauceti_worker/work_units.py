@@ -59,6 +59,7 @@ from .constants import (
 )
 from .github import GitHub, GitHubError, claims_repo, ensure_fork, gh_run, me
 from .intentions import claimed_avoid_list
+from .owned_prs import OwnedPRs, OwnedPRStateError
 from .paths import CLAIM_SH, HERE
 from .quota import Quota, _unavail_reason, mirror_creds
 from .review_diagnostics import (
@@ -115,6 +116,7 @@ class RoundOpts:
     review_scope_prs: list[int] = field(default_factory=list)
     review_scope_authors: list[str] = field(default_factory=list)
     review_scope_requested: bool = False
+    tend_scope: str = "author"
 
     @property
     def agent_name(self) -> str:
@@ -222,6 +224,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         review_scope_authors=getattr(opts, "review_scope_authors", ()),
         review_scope_requested=getattr(opts, "review_scope_requested", False),
         scoped_review_only=set(opts.only) == {"review"},
+        tend_scope=getattr(opts, "tend_scope", None),
     )
     if sv.github_failed:
         detail = " ".join((sv.errors[0] if sv.errors else "GitHub survey failed").split())[:500]
@@ -229,6 +232,9 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
 
     label = "scoped open PRs" if sv.review_query_scoped else "open PRs"
     log(f"{label}: {sv.status_label_line()}")
+    if sv.tend_scope == "owned":
+        detail = "missing or unreadable ownership record" if sv.owned_prs is None else f"{len(sv.owned_prs)} recorded PR(s)"
+        log(f"maintenance scope: owned ({detail}; maintenance is fail-closed)" if sv.owned_prs is None else f"maintenance scope: owned ({detail})")
     if sv.review_scope_requested:
         areas = ",".join(sv.review_scope_roadmaps) or "none"
         prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"
@@ -1228,6 +1234,20 @@ def stage_rubrics(review_dir: Path, out_dir: Path) -> Path | None:
         return None
 
 
+def _register_owned_receipt(cfg: Config, receipt: Path) -> None:
+    """Consume one wrapper receipt into the instance's atomic PR-number ownership record."""
+    if not receipt.exists():
+        return
+    raw = receipt.read_text(encoding="ascii")
+    numbers = [int(line) for line in raw.splitlines() if line]
+    if any(number <= 0 for number in numbers) or len(numbers) != len(set(numbers)):
+        raise OwnedPRStateError(f"invalid PR receipt {receipt}")
+    owned = OwnedPRs(cfg)
+    for number in numbers:
+        owned.add(number)
+    receipt.unlink(missing_ok=True)
+
+
 def do_roadmap(w, sv, c, opts, bubble) -> int:
     only = c.reason or "any"
     skip = roadmap_skip()
@@ -1286,16 +1306,52 @@ def do_roadmap(w, sv, c, opts, bubble) -> int:
   If the PR derives any content from it, name the source repository, commit, and license in the PR
   body, and do not migrate material whose license does not permit it.
 """
-    if bubble:
-        mounts = [f"{refs / 'roadmap'}:/opt/roadmap:ro", f"{refs / 'review'}:/opt/review:ro"]
-        if bundle is not None:
-            mounts.append(f"{refs / 'rubrics'}:/opt/rubrics:ro")
-        if source_dir is not None:
-            mounts.append(f"{source_dir}:/opt/source:ro")
-        return run_in_bubble(
-            w,
-            TAUCETI,
-            fill_prompt(
+    receipt_dir = w.cfg.state / "owned-prs-inbox"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt = receipt_dir / f"{os.getpid()}-{time.time_ns()}.txt"
+    receipt_env = "/opt/owned-prs-inbox/" + receipt.name if bubble else str(receipt)
+    old_receipt = os.environ.get("TAUCETI_PR_RECEIPT_FILE")
+    os.environ["TAUCETI_PR_RECEIPT_FILE"] = receipt_env
+    try:
+        if bubble:
+            mounts = [
+                f"{refs / 'roadmap'}:/opt/roadmap:ro",
+                f"{refs / 'review'}:/opt/review:ro",
+                f"{receipt_dir}:/opt/owned-prs-inbox:rw",
+            ]
+            if bundle is not None:
+                mounts.append(f"{refs / 'rubrics'}:/opt/rubrics:ro")
+            if source_dir is not None:
+                mounts.append(f"{source_dir}:/opt/source:ro")
+            rc = run_in_bubble(
+                w,
+                TAUCETI,
+                fill_prompt(
+                    HERE / "prompts" / "roadmap.md",
+                    ONLY=only,
+                    SKIP=skip_str,
+                    CLAIMED=claimed_str,
+                    AGENT=opts.agent_name,
+                    FORK=fork_owner,
+                    WORKERID=w.cfg.wid,
+                    ROADMAP_DIR="/opt/roadmap/TauCetiRoadmap",
+                    REVIEW_DIR="/opt/review",
+                    RUBRICS=(
+                        f"/opt/rubrics/{RUBRIC_BUNDLE}"
+                        if bundle is not None
+                        else "/opt/review/rubrics (read every .md file in it)"
+                    ),
+                    SOURCE_GUIDANCE=source_guidance,
+                    BIN=wrapper_bin(bubble=True),
+                ),
+                opts,
+                mounts=mounts,
+                allow_push=fork,  # bubble grants git fetch/push to the fork (kim-em/bubble#320)
+            )
+        else:
+            if not prepare_checkout(w.cfg):
+                raise Die("checkout failed")
+            prompt = fill_prompt(
                 HERE / "prompts" / "roadmap.md",
                 ONLY=only,
                 SKIP=skip_str,
@@ -1303,34 +1359,30 @@ def do_roadmap(w, sv, c, opts, bubble) -> int:
                 AGENT=opts.agent_name,
                 FORK=fork_owner,
                 WORKERID=w.cfg.wid,
-                ROADMAP_DIR="/opt/roadmap/TauCetiRoadmap",
-                REVIEW_DIR="/opt/review",
-                RUBRICS=(
-                    f"/opt/rubrics/{RUBRIC_BUNDLE}"
-                    if bundle is not None
-                    else "/opt/review/rubrics (read every .md file in it)"
-                ),
+                ROADMAP_DIR=str(refs / "roadmap" / "TauCetiRoadmap"),
+                REVIEW_DIR=str(refs / "review"),
+                RUBRICS=(str(bundle) if bundle is not None else f"{refs / 'review' / 'rubrics'} (read every .md file in it)"),
                 SOURCE_GUIDANCE=source_guidance,
-                BIN=wrapper_bin(bubble=True),
-            ),
-            opts,
-            mounts=mounts,
-            allow_push=fork,  # bubble grants git fetch/push to the fork (kim-em/bubble#320)
-        )
-    if not prepare_checkout(w.cfg):
-        raise Die("checkout failed")
-    prompt = fill_prompt(
-        HERE / "prompts" / "roadmap.md",
-        ONLY=only,
-        SKIP=skip_str,
-        CLAIMED=claimed_str,
-        AGENT=opts.agent_name,
-        FORK=fork_owner,
-        WORKERID=w.cfg.wid,
-        ROADMAP_DIR=str(refs / "roadmap" / "TauCetiRoadmap"),
-        REVIEW_DIR=str(refs / "review"),
-        RUBRICS=(str(bundle) if bundle is not None else f"{refs / 'review' / 'rubrics'} (read every .md file in it)"),
-        SOURCE_GUIDANCE=source_guidance,
-        BIN=wrapper_bin(),
-    )
-    return run_agent_host(w.cfg.checkout, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
+                BIN=wrapper_bin(),
+            )
+            rc = run_agent_host(w.cfg.checkout, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
+    except BaseException:
+        if old_receipt is None:
+            os.environ.pop("TAUCETI_PR_RECEIPT_FILE", None)
+        else:
+            os.environ["TAUCETI_PR_RECEIPT_FILE"] = old_receipt
+        raise
+
+    # Consume receipts even when the model exits non-zero: gh pr create may have succeeded before the
+    # agent encountered a later problem. A malformed receipt or failed atomic state write is fatal and
+    # leaves an owned PR unattended rather than widening scope as a recovery fallback.
+    try:
+        _register_owned_receipt(w.cfg, receipt)
+    except (OSError, ValueError) as exc:
+        raise Die(f"roadmap PR ownership registration failed: {exc}") from exc
+    finally:
+        if old_receipt is None:
+            os.environ.pop("TAUCETI_PR_RECEIPT_FILE", None)
+        else:
+            os.environ["TAUCETI_PR_RECEIPT_FILE"] = old_receipt
+    return rc

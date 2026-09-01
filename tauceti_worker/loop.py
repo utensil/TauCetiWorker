@@ -3,6 +3,7 @@ timeout, then settle (short pause if productive, escalating back-off otherwise).
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -214,6 +215,8 @@ def cmd_loop(
 
             # 2) Run ONE round as a child in its own process group, under the hard timeout.
             tail = ["--worker-id", cfg.wid]
+            tend_scope = getattr(args, "tend_scope", None) or os.environ.get("TAUCETI_TEND_SCOPE", "author")
+            tail += ["--tend-scope", tend_scope]
             tail += review_scope_tail(review_scope_roadmaps, review_scope_prs, review_scope_authors)
             if only:
                 tail += ["--only", ",".join(only)]
