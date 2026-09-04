@@ -102,9 +102,7 @@ def cmd_loop(
     ignore_quota = getattr(args, "ignore_quota", False)
     bubble = getattr(args, "bubble", False)
     quota_cmd = getattr(args, "quota_cmd", None)
-    retry_exhausted_fixes = bool(
-        getattr(args, "retry_exhausted_fixes", False) or retry_exhausted_fixes_enabled()
-    )
+    retry_exhausted_fixes = bool(getattr(args, "retry_exhausted_fixes", False) or retry_exhausted_fixes_enabled())
     log(
         f"loop start: worker={cfg.wid} only={','.join(only) or '(all)'} agent={agent}"
         f" retry_exhausted_fixes={'owned-only' if retry_exhausted_fixes else 'off'}"

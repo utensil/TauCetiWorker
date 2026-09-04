@@ -246,7 +246,9 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
             else f"maintenance scope: owned ({detail})"
         )
     if sv.retry_exhausted_fixes:
-        log("fix retry override enabled: exhausted per-head attempts remain actionable within the finite owned recovery budget")
+        log(
+            "fix retry override enabled: exhausted per-head attempts remain actionable within the finite owned recovery budget"
+        )
     if sv.review_scope_requested:
         areas = ",".join(sv.review_scope_roadmaps) or "none"
         prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"
