@@ -820,6 +820,20 @@ def survey(
         #    green, attempts spent) so a fix-focused worker explains its idleness instead of a bare
         #    "no eligible work" — reviews are async, so a one-shot fix run can precede the scoreboard.
         for p in tended:
+            # A review finding is not actionable until the authoritative build for this exact head is
+            # green.  After a push, GitHub can briefly retain the prior scoreboard (and its blocking
+            # states) while the new build is queued; dispatching `fix` in that window burns a per-head
+            # attempt against stale evidence and can exhaust the recovery allowance before re-review.
+            # `fix-ci`/`bump` own red builds, so keep this gate local to the review-fix stage and explain
+            # the wait in the normal diagnostic stream.
+            if not p.build_success:
+                sv.fix_waiting.append(
+                    (
+                        p.number,
+                        "authoritative build is not green yet — waiting for CI before tending review findings",
+                    )
+                )
+                continue
             meta = rs.gh_meta(p.number)
             blocking = rs.ledger_blocking(p.number, p.head_oid)
             per_head = counters.read(f"fix-{p.number}-{p.head_oid[:12]}")

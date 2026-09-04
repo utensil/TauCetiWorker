@@ -68,6 +68,33 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     check("owned survey backpressure counts only owned PRs", sv.n_mine_open == 1)
     sv_cap = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned", max_open_prs=1)
     check("owned survey uses its worker-local cap", sv_cap.roadmap_backpressure)
+    # A stale blocking scoreboard must not dispatch the review fixer while the current head's
+    # authoritative build is still pending.  The fake review state raises if consulted, proving the
+    # build gate runs before the stale metadata path.
+    pending_raw = [
+        {
+            **pr(3),
+            "statusCheckRollup": [],
+        }
+    ]
+    old_due = survey_mod.progress_due
+    old_pr_list = gh.pr_list
+    survey_mod.progress_due = lambda *_args, **_kwargs: (False, "")
+    gh.pr_list = lambda fields: pending_raw
+    exploding_rs = SimpleNamespace(
+        gh_meta=lambda _pr: (_ for _ in ()).throw(AssertionError("stale review metadata was consulted")),
+        ledger_blocking=lambda *_args: (_ for _ in ()).throw(AssertionError("stale blocking state was consulted")),
+    )
+    try:
+        sv_pending = survey_mod.survey(cfg, gh, exploding_rs, counters, deep=True, tend_scope="owned")
+        check("pending build does not dispatch stale review fix", not sv_pending.needs_fix.actionable)
+        check(
+            "pending build is explained in fix diagnostics",
+            any("authoritative build is not green" in why for _pr, why in sv_pending.fix_waiting),
+        )
+    finally:
+        survey_mod.progress_due = old_due
+        gh.pr_list = old_pr_list
     try:
         survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="author", retry_exhausted_fixes=True)
     except ValueError as exc:

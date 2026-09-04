@@ -33,6 +33,11 @@ lake exe axioms
 ```
 Iterate until green. Never push red.
 
+Run each command synchronously in a single foreground shell invocation with a generous timeout. Do
+not use the interactive `write_stdin`/session-polling tool for a long-running cache or build command:
+its transient process handle can disappear before the result is returned. If a tool call yields a
+session id anyway, rerun the command with a longer foreground timeout rather than polling that id.
+
 **Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
 
 ## Submit
