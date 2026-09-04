@@ -68,6 +68,12 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     check("owned survey backpressure counts only owned PRs", sv.n_mine_open == 1)
     sv_cap = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned", max_open_prs=1)
     check("owned survey uses its worker-local cap", sv_cap.roadmap_backpressure)
+    try:
+        survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="author", retry_exhausted_fixes=True)
+    except ValueError as exc:
+        check("exhausted-fix recovery rejects unscoped maintenance", "owned" in str(exc))
+    else:
+        check("exhausted-fix recovery rejects unscoped maintenance", False)
 
     receipt = root / "receipt"
     receipt.write_text("21\n")

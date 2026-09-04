@@ -25,6 +25,9 @@ CLAIMS = "TauCetiProject/tauceti-claims"
 MAX_FIX_ATTEMPTS = 3  # per-head: stop re-running the fixer on a commit it can't change (a stuck
 
 # head never advances a review round, so CI's round cap can't catch it).
+# An explicit, owned-only recovery run gets this many additional attempts. Keeping the recovery
+# budget finite preserves the normal anti-churn gate if an operator leaves the recovery switch on.
+MAX_FIX_RECOVERY_ATTEMPTS = 3
 # The review-ROUND budget lives in CI now (TauCeti housekeeping closes a PR reviewed to its cap while
 # still blocking). The worker no longer caps its own review rounds — it keeps reviewing on every new
 # head until the PR merges or CI closes it — so every PR reaches a terminal state.

@@ -64,6 +64,22 @@ def respect_claims() -> bool:
     return os.environ.get("TAUCETI_RESPECT_CLAIMS", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
+def retry_exhausted_fixes_enabled() -> bool:
+    """Whether an explicitly scoped worker may retry a fix after its per-head budget.
+
+    The normal three-attempt stop remains the default.  This is an operator recovery
+    switch, and the work CLI additionally requires ``--tend-scope owned`` before it
+    can reach a round.  Keeping the environment form here lets a managed worker pass
+    the setting through its closed ``env`` table without adding another manager field.
+    """
+    return os.environ.get("TAUCETI_RETRY_EXHAUSTED_FIXES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _only_label(sv=None) -> str:
     """Friendly render of the roadmap-only area for the status bar. Prefers the survey's sanitized
     value ("auto"/"any"/area); falls back to the raw env tri-state before the first survey lands."""

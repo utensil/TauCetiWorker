@@ -49,6 +49,7 @@ from .config import (
     auto_assign_wid,
     is_git_url,
     log,
+    retry_exhausted_fixes_enabled,
     roadmap_only,
     sanitize_wid,
     set_log_file,
@@ -121,6 +122,7 @@ multiple workers (share a host and coordinate through GitHub; a distinct id name
 environment (flags win; full reference linked below):
   TAUCETI_AGENT          default for --agent
   TAUCETI_TEND_SCOPE     maintenance scope: author (legacy) or owned (this worker's PRs only)
+  TAUCETI_RETRY_EXHAUSTED_FIXES  finite recovery attempts for a spent fix budget; owned scope only
   TAUCETI_WORKER_ID      pins the worker id (else `work` auto-assigns worker1, worker2, ...)
   TAUCETI_ROADMAP_ONLY   single roadmap area (unset = a fresh random area each round; "" = all areas)
   TAUCETI_ROADMAP_SKIP   comma-separated roadmap areas to exclude from selection
@@ -202,6 +204,13 @@ def add_work_flags(p: argparse.ArgumentParser) -> None:
         default=None,
         metavar="N",
         help=f"roadmap authoring backpressure for this worker (default: {MAX_OPEN_PRS}; positive integer)",
+    )
+    p.add_argument(
+        "--retry-exhausted-fixes",
+        dest="retry_exhausted_fixes",
+        action="store_true",
+        default=None,
+        help="use the finite recovery budget after the per-head limit; requires --tend-scope owned and is inherited by loop children",
     )
     p.add_argument(
         "--skip",
@@ -802,6 +811,16 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
     if tend_scope not in ("author", "owned"):
         raise Die("--tend-scope must be 'author' or 'owned'")
     os.environ["TAUCETI_TEND_SCOPE"] = tend_scope
+    retry_exhausted_fixes = getattr(args, "retry_exhausted_fixes", None)
+    if retry_exhausted_fixes is None:
+        retry_exhausted_fixes = retry_exhausted_fixes_enabled()
+    if retry_exhausted_fixes and tend_scope != "owned":
+        raise Die("--retry-exhausted-fixes/$TAUCETI_RETRY_EXHAUSTED_FIXES requires --tend-scope owned")
+    if retry_exhausted_fixes:
+        os.environ["TAUCETI_RETRY_EXHAUSTED_FIXES"] = "1"
+    else:
+        os.environ.pop("TAUCETI_RETRY_EXHAUSTED_FIXES", None)
+    args.retry_exhausted_fixes = retry_exhausted_fixes
     max_open_prs = resolve_max_open_prs(args)
     # Keep the cap process-local and explicit; unlike the older tend-scope setting it must not bleed
     # through a shell-wide environment variable into another worker instance.
@@ -986,6 +1005,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             review_scope_requested=review_scope_requested,
             tend_scope=tend_scope,
             max_open_prs=max_open_prs,
+            retry_exhausted_fixes=retry_exhausted_fixes,
         )
         # Before preflight, and NOT gated on --dry-run: --dry-run is how an operator checks their setup,
         # so it is the one run that most needs to answer "am I on the right account?". The check is a
