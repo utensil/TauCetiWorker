@@ -122,7 +122,7 @@ multiple workers (share a host and coordinate through GitHub; a distinct id name
 environment (flags win; full reference linked below):
   TAUCETI_AGENT          default for --agent
   TAUCETI_TEND_SCOPE     maintenance scope: author (legacy) or owned (this worker's PRs only)
-  TAUCETI_RETRY_EXHAUSTED_FIXES  finite recovery attempts for a spent fix budget; owned scope only
+  TAUCETI_RETRY_EXHAUSTED_FIXES  unlimited retries after a spent fix budget; owned scope only
   TAUCETI_WORKER_ID      pins the worker id (else `work` auto-assigns worker1, worker2, ...)
   TAUCETI_ROADMAP_ONLY   single roadmap area (unset = a fresh random area each round; "" = all areas)
   TAUCETI_ROADMAP_SKIP   comma-separated roadmap areas to exclude from selection
@@ -210,7 +210,7 @@ def add_work_flags(p: argparse.ArgumentParser) -> None:
         dest="retry_exhausted_fixes",
         action="store_true",
         default=None,
-        help="use the finite recovery budget after the per-head limit; requires --tend-scope owned and is inherited by loop children",
+        help="remove the per-head fix limit for owned PRs; requires --tend-scope owned and is inherited by loop children",
     )
     p.add_argument(
         "--skip",

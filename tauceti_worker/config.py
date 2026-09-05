@@ -65,12 +65,12 @@ def respect_claims() -> bool:
 
 
 def retry_exhausted_fixes_enabled() -> bool:
-    """Whether an explicitly scoped worker may retry a fix after its per-head budget.
+    """Whether an explicitly scoped worker may retry a fix without a per-head ceiling.
 
-    The normal three-attempt stop remains the default.  This is an operator recovery
-    switch, and the work CLI additionally requires ``--tend-scope owned`` before it
-    can reach a round.  Keeping the environment form here lets a managed worker pass
-    the setting through its closed ``env`` table without adding another manager field.
+    The normal three-attempt stop remains the default. This operator switch is unlimited,
+    and the work CLI additionally requires ``--tend-scope owned`` before it can reach a
+    round. Keeping the environment form here lets a managed worker pass the setting
+    through its closed ``env`` table without adding another manager field.
     """
     return os.environ.get("TAUCETI_RETRY_EXHAUSTED_FIXES", "").strip().lower() in (
         "1",

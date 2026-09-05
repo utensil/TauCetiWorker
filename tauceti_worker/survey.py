@@ -24,7 +24,6 @@ from .constants import (
     MAX_CI_ATTEMPTS,
     MAX_CI_PR_ATTEMPTS,
     MAX_FIX_ATTEMPTS,
-    MAX_FIX_RECOVERY_ATTEMPTS,
     MAX_OPEN_PRS,
     MAX_PROGRESS_ERRORS,
     MAX_REBASE_ATTEMPTS,
@@ -474,8 +473,8 @@ def fix_disposition(
     """Classify a tended PR for the `fix` stage from its scoreboard meta. Returns (disposition, reason):
 
       'actionable' — a blocking rubric stands at the current head, under the per-head attempt budget,
-                     or an explicitly scoped recovery override still has recovery attempts left
-      'exhausted'  — blocking at head, but the normal or finite recovery fixer budget is spent
+                     or an explicitly scoped owned override removes the fix ceiling
+      'exhausted'  — blocking at head, but the normal fixer budget is spent
       'waiting'    — not actionable now; reason explains why (awaiting first review, head moved,
                      reviews all green, or a transient fetch failure) so a fix-focused worker can say
                      whether to wait for reviews, re-push, or stop
@@ -514,15 +513,9 @@ def fix_disposition(
             f"blocking review at head, but fix attempts are spent ({per_head}/{MAX_FIX_ATTEMPTS}) — needs a human",
         )
     if per_head >= MAX_FIX_ATTEMPTS:
-        recovery_limit = MAX_FIX_ATTEMPTS + MAX_FIX_RECOVERY_ATTEMPTS
-        if per_head >= recovery_limit:
-            return (
-                "exhausted",
-                f"blocking review at head, including recovery attempts, is spent ({per_head}/{recovery_limit}) — needs a human",
-            )
         return (
             "actionable",
-            f"retry override enabled ({per_head}/{MAX_FIX_ATTEMPTS}; recovery budget {recovery_limit - per_head} left)",
+            f"retry override enabled ({per_head}/{MAX_FIX_ATTEMPTS}; unlimited owned retries)",
         )
     return ("actionable", "")
 
@@ -860,7 +853,7 @@ def survey(
                     p.head_oid,
                     "blocking review at head",
                     attempts=per_head,
-                    budget=MAX_FIX_ATTEMPTS + (MAX_FIX_RECOVERY_ATTEMPTS if retry_exhausted_fixes else 0),
+                    budget=0 if retry_exhausted_fixes else MAX_FIX_ATTEMPTS,
                 )
                 sv.needs_fix.actionable.append(c)
                 continue
@@ -871,7 +864,7 @@ def survey(
                     p.head_oid,
                     "blocking review at head",
                     attempts=per_head,
-                    budget=MAX_FIX_ATTEMPTS + (MAX_FIX_RECOVERY_ATTEMPTS if retry_exhausted_fixes else 0),
+                    budget=0 if retry_exhausted_fixes else MAX_FIX_ATTEMPTS,
                 )
                 sv.needs_fix.suppressed.append(c)
 

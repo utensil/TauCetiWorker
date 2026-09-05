@@ -11,7 +11,7 @@ list is in `tauceti work -h`. For persistent workers, see
 | `--loop` | Run the driver: keep doing rounds, pacing against quota between them, instead of one. |
 | `--only TASKS` | Restrict the round to a comma list of `rebase,bump,progress,fix-ci,fix,review,roadmap` (default: the whole cascade). |
 | `--tend-scope {author,owned}` | Maintenance PR scope. `author` is legacy author-wide behavior; `owned` tends only PRs recorded for this worker id (fail-closed when its local record is absent or invalid). |
-| `--retry-exhausted-fixes` | Explicitly keep a blocking `fix` candidate actionable after its per-head attempt budget; requires `--tend-scope owned` and is inherited by loop rounds. |
+| `--retry-exhausted-fixes` | Remove the per-head attempt ceiling for blocking `fix` candidates; requires `--tend-scope owned` and is inherited by loop rounds. |
 | `--skip TASKS` | Drop a comma list of tasks from the cascade. Combines with `--only` by subtraction. |
 | `--agent AGENT` | `auto` (default), `codex`, `claude`, `kiro`, `deepseek`, or `minimax`. Kiro and OpenRouter providers are explicit-only and unpaced. |
 | `--author-model MODEL` | Exact authoring model for an explicit provider (CLI > provider environment > committed default). |
@@ -174,7 +174,7 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `TAUCETI_ROADMAP_EXTRA_IDENTITIES` | _(unset)_ | Comma-separated extra GitHub logins whose claimed intentions count as the worker's own. |
 | `TAUCETI_RESPECT_CLAIMS` | `true` | Whether roadmap workers avoid others' claimed intentions; `false` is the same as `--ignore-claims`. |
 | `TAUCETI_QUOTA_CMD` | — | Default for `--quota-cmd`. |
-| `TAUCETI_RETRY_EXHAUSTED_FIXES` | _(unset)_ | Environment form of `--retry-exhausted-fixes`; accepted only for an owned maintenance worker. |
+| `TAUCETI_RETRY_EXHAUSTED_FIXES` | _(unset)_ | Environment form of `--retry-exhausted-fixes` (unlimited owned fix retries); accepted only for an owned maintenance worker. |
 | `TAUCETI_AUTO_REFRESH` | _(unset)_ | `1` is the same as `--auto-refresh`. |
 | `TAUCETI_PACE` | _(unset)_ | Pacing curve for `--pace` (`time%:budget%` points); unset = `60:40`. |
 | `TAUCETI_STREAM` | — | `1` is the same as `--stream`. |

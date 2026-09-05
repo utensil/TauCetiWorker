@@ -247,7 +247,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         )
     if sv.retry_exhausted_fixes:
         log(
-            "fix retry override enabled: exhausted per-head attempts remain actionable within the finite owned recovery budget"
+            "fix retry override enabled: exhausted per-head attempts remain actionable with unlimited owned retries"
         )
     if sv.review_scope_requested:
         areas = ",".join(sv.review_scope_roadmaps) or "none"

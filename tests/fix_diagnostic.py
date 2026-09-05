@@ -24,7 +24,6 @@ import tauceti_worker as tc
 HEAD = "a7952da7d6c21accf63db1163faa24a04c0c57e8"
 OLD = "0000000000000000000000000000000000000000"
 MAX = tc.MAX_FIX_ATTEMPTS
-RECOVERY_MAX = tc.MAX_FIX_RECOVERY_ATTEMPTS
 
 fails = 0
 
@@ -92,10 +91,10 @@ check(
     "retry override",
 )
 check(
-    "blocking at head, finite recovery budget spent -> exhausted",
-    disp(meta({"head_sha": HEAD}), blocking=True, per_head=MAX + RECOVERY_MAX, retry_exhausted_fixes=True),
-    "exhausted",
-    "recovery attempts",
+    "blocking at head, owned recovery override remains unlimited",
+    disp(meta({"head_sha": HEAD}), blocking=True, per_head=MAX + 1000, retry_exhausted_fixes=True),
+    "actionable",
+    "unlimited owned retries",
 )
 
 # --- waiting: head matches but nothing blocks ----------------------------------------------------

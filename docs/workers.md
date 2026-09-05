@@ -132,11 +132,11 @@ the fingerprint, so editing it restarts that worker and leaves the others alone,
 and both `workers status` and the dashboard name the variables it sets, so the
 odd worker out is visible rather than mysterious.
 
-For an explicit, finite recovery of a spent fix budget, set
+For an explicit unlimited recovery of a spent fix budget, set
 `TAUCETI_RETRY_EXHAUSTED_FIXES = "1"` in that worker's `env` table and keep
 `tend_scope = "owned"`. The equivalent direct CLI flag is
 `--retry-exhausted-fixes`; both forms are inherited by loop rounds and allow
-three additional attempts per unchanged head before the human gate returns. They are
+unlimited additional attempts per unchanged head. They are
 deliberately rejected for author-wide maintenance.
 
 Review allowlists remain command-local from the Worker's perspective. The
@@ -203,7 +203,7 @@ entry with `enabled = true`.
 | `--roadmap-skip AREAS` | `roadmap_skip`, as a comma-separated list |
 | `--tend-scope {author,owned}` | `tend_scope` |
 | `--max-open-prs N` | `max_open_prs` |
-| `--retry-exhausted-fixes` | `retry_exhausted_fixes`; requires `--tend-scope owned` and is inherited by loop rounds |
+| `--retry-exhausted-fixes` | `retry_exhausted_fixes` (unlimited owned fix retries); requires `--tend-scope owned` and is inherited by loop rounds |
 | `--source PATH_OR_URL` | `source`; also requires `roadmap` in `--only` and a non-empty `--roadmap-only` |
 | `--author-model MODEL` | `author_model` |
 | `--author-effort EFFORT` | `author_effort`; Codex, Claude, or Kiro only |
