@@ -879,7 +879,12 @@ def survey(
         per_pr = counters.read(f"ci-pr-{p.number}")
         c.attempts, c.budget = per_head, MAX_CI_ATTEMPTS
         if per_head >= MAX_CI_ATTEMPTS or per_pr >= MAX_CI_PR_ATTEMPTS:
-            sv.red_ci.suppressed.append(c)
+            if retry_exhausted_fixes:
+                c.reason = "build failed at head (retry override)"
+                c.budget = 0
+                sv.red_ci.actionable.append(c)
+            else:
+                sv.red_ci.suppressed.append(c)
         else:
             sv.red_ci.actionable.append(c)
 

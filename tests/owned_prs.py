@@ -102,6 +102,30 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     else:
         check("exhausted-fix recovery rejects unscoped maintenance", False)
 
+    # The same owned-only override must reopen exhausted red-CI work, including the lifetime PR cap.
+    red = {**pr(3), "statusCheckRollup": [{"context": "build", "state": "FAILURE"}]}
+    gh.pr_list = lambda fields: [red]
+    exhausted = SimpleNamespace(
+        read=lambda name: (
+            survey_mod.MAX_CI_ATTEMPTS
+            if name.startswith("ci-") and name != "ci-pr-3"
+            else survey_mod.MAX_CI_PR_ATTEMPTS
+            if name == "ci-pr-3"
+            else 0
+        )
+    )
+    sv_red = survey_mod.survey(
+        cfg,
+        gh,
+        None,
+        exhausted,
+        deep=False,
+        tend_scope="owned",
+        retry_exhausted_fixes=True,
+    )
+    check("owned recovery override reopens exhausted fix-ci", [c.pr for c in sv_red.red_ci.actionable] == [3])
+    check("owned recovery override marks fix-ci budget unlimited", sv_red.red_ci.actionable[0].budget == 0)
+
     receipt = root / "receipt"
     receipt.write_text("21\n")
     work_units_mod._register_owned_receipt(cfg, receipt)
