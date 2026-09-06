@@ -65,7 +65,10 @@ lease_json() {
 }
 
 # build_oid JSON — write an orphan commit (empty tree) whose message is JSON; print its oid.
-build_oid() { printf '%s' "$1" | g commit-tree "$(empty_tree)"; }
+# `commit-tree` only reads stdin when explicitly told to use it. Without `-F -`, the lease payload
+# silently becomes an empty commit message, so `holds`/`renew` cannot recover the owner and every
+# safe push fails closed as "lease lost". Keep the JSON in the commit message, where lease_json reads it.
+build_oid() { printf '%s' "$1" | g commit-tree "$(empty_tree)" -F -; }
 
 # payload KEY EXPIRES — the lease JSON for a claim I'm taking now.
 payload() {

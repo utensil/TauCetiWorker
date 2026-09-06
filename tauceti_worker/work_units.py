@@ -118,6 +118,7 @@ class RoundOpts:
     review_scope_requested: bool = False
     tend_scope: str = "author"
     max_open_prs: int = MAX_OPEN_PRS
+    retry_exhausted_fixes: bool = False
 
     @property
     def agent_name(self) -> str:
@@ -227,6 +228,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         scoped_review_only=set(opts.only) == {"review"},
         tend_scope=getattr(opts, "tend_scope", None),
         max_open_prs=getattr(opts, "max_open_prs", None),
+        retry_exhausted_fixes=getattr(opts, "retry_exhausted_fixes", False),
     )
     if sv.github_failed:
         detail = " ".join((sv.errors[0] if sv.errors else "GitHub survey failed").split())[:500]
@@ -243,6 +245,8 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
             if sv.owned_prs is None
             else f"maintenance scope: owned ({detail})"
         )
+    if sv.retry_exhausted_fixes:
+        log("fix retry override enabled: exhausted per-head attempts remain actionable with unlimited owned retries")
     if sv.review_scope_requested:
         areas = ",".join(sv.review_scope_roadmaps) or "none"
         prs = ",".join(f"#{pr}" for pr in sv.review_scope_prs) or "none"

@@ -21,7 +21,7 @@ REVIEW = "TauCetiProject/TauCetiReview"
 CLAIMS = "TauCetiProject/tauceti-claims"
 
 
-# Per-PR budgets (a PR can never churn forever).
+# Per-PR budgets (the owned fix override deliberately removes only the fix ceiling).
 MAX_FIX_ATTEMPTS = 3  # per-head: stop re-running the fixer on a commit it can't change (a stuck
 
 # head never advances a review round, so CI's round cap can't catch it).

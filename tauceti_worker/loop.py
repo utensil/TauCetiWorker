@@ -10,7 +10,7 @@ import sys
 import time
 
 from .agents import resolve_authoring_profile
-from .config import Config, NoProgress, log
+from .config import Config, NoProgress, log, retry_exhausted_fixes_enabled
 from .constants import BACKOFF_BASE, BACKOFF_MAX, EX_NOPROGRESS, GH_MIN_BUDGET, INTERROUND, OPENROUTER_MODELS, POLL
 from .github import github_budget
 from .quota import Provider, Quota, _glyph, _hours, _unavail_reason, quota_line
@@ -102,8 +102,13 @@ def cmd_loop(
     ignore_quota = getattr(args, "ignore_quota", False)
     bubble = getattr(args, "bubble", False)
     quota_cmd = getattr(args, "quota_cmd", None)
-    log(f"loop start: worker={cfg.wid} only={','.join(only) or '(all)'} agent={agent}{' [bubble]' if bubble else ''}")
-    report_runtime("idle", detail="loop started", phase=None, target=None, next_action_at=None)
+    retry_exhausted_fixes = bool(getattr(args, "retry_exhausted_fixes", False) or retry_exhausted_fixes_enabled())
+    log(
+        f"loop start: worker={cfg.wid} only={','.join(only) or '(all)'} agent={agent}"
+        f" retry_exhausted_fixes={'owned-only' if retry_exhausted_fixes else 'off'}"
+        f"{' [bubble]' if bubble else ''}"
+    )
+    report_runtime("idle", worker_id=cfg.wid, detail="loop started", phase=None, target=None, next_action_at=None)
     streak = 0
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
@@ -220,6 +225,11 @@ def cmd_loop(
             max_open_prs = getattr(args, "max_open_prs", None)
             if max_open_prs is not None:
                 tail += ["--max-open-prs", str(max_open_prs)]
+            retry_exhausted_fixes = bool(
+                getattr(args, "retry_exhausted_fixes", False) or retry_exhausted_fixes_enabled()
+            )
+            if retry_exhausted_fixes:
+                tail.append("--retry-exhausted-fixes")
             tail += review_scope_tail(review_scope_roadmaps, review_scope_prs, review_scope_authors)
             if only:
                 tail += ["--only", ",".join(only)]

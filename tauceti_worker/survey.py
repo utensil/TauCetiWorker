@@ -227,6 +227,7 @@ class Survey:
     roadmap_skip: list[str] = field(default_factory=list)
     tend_scope: str = "author"
     max_open_prs: int = MAX_OPEN_PRS
+    retry_exhausted_fixes: bool = False
     owned_prs: list[int] | None = None
     # This is deliberately scoped by roadmap_only/roadmap_skip: authoring backpressure in a focused
     # run is the number of our open, non-draft roadmap PRs that belong to that run's selected areas,
@@ -467,11 +468,13 @@ def fix_disposition(
     per_head: int,
     *,
     pending_contest: bool = False,
+    retry_exhausted_fixes: bool = False,
 ) -> tuple[str, str]:
     """Classify a tended PR for the `fix` stage from its scoreboard meta. Returns (disposition, reason):
 
-      'actionable' — a blocking rubric stands at the current head, under the per-head attempt budget
-      'exhausted'  — blocking at head, but the per-head fixer budget is spent (reason names the count)
+      'actionable' — a blocking rubric stands at the current head, under the per-head attempt budget,
+                     or an explicitly scoped owned override removes the fix ceiling
+      'exhausted'  — blocking at head, but the normal fixer budget is spent
       'waiting'    — not actionable now; reason explains why (awaiting first review, head moved,
                      reviews all green, or a transient fetch failure) so a fix-focused worker can say
                      whether to wait for reviews, re-push, or stop
@@ -504,10 +507,15 @@ def fix_disposition(
         # review adjudicates that reply, the durable scoreboard remains blocking at the same head;
         # scheduling another fixer would only burn the per-head budget on the identical finding.
         return ("waiting", "author contest awaiting re-review")
-    if per_head >= MAX_FIX_ATTEMPTS:
+    if per_head >= MAX_FIX_ATTEMPTS and not retry_exhausted_fixes:
         return (
             "exhausted",
             f"blocking review at head, but fix attempts are spent ({per_head}/{MAX_FIX_ATTEMPTS}) — needs a human",
+        )
+    if per_head >= MAX_FIX_ATTEMPTS:
+        return (
+            "actionable",
+            f"retry override enabled ({per_head}/{MAX_FIX_ATTEMPTS}; unlimited owned retries)",
         )
     return ("actionable", "")
 
@@ -618,6 +626,7 @@ def survey(
     review_scope_requested: bool = False,
     tend_scope: str | None = None,
     max_open_prs: int | None = None,
+    retry_exhausted_fixes: bool = False,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
@@ -636,6 +645,8 @@ def survey(
     tend_scope = tend_scope or os.environ.get("TAUCETI_TEND_SCOPE", "author")
     if tend_scope not in ("author", "owned"):
         raise ValueError(f"invalid tend scope: {tend_scope!r}")
+    if retry_exhausted_fixes and tend_scope != "owned":
+        raise ValueError("retrying exhausted fixes requires tend_scope='owned'")
     if max_open_prs is None:
         max_open_prs = MAX_OPEN_PRS
     max_open_prs = validate_max_open_prs(max_open_prs)
@@ -650,6 +661,7 @@ def survey(
         review_scope_requested=scope_requested,
         tend_scope=tend_scope,
         max_open_prs=max_open_prs,
+        retry_exhausted_fixes=retry_exhausted_fixes,
         review_query_scoped=use_scoped_query,
         review_query_strategy=(
             "explicit-pr"
@@ -801,6 +813,20 @@ def survey(
         #    green, attempts spent) so a fix-focused worker explains its idleness instead of a bare
         #    "no eligible work" — reviews are async, so a one-shot fix run can precede the scoreboard.
         for p in tended:
+            # A review finding is not actionable until the authoritative build for this exact head is
+            # green.  After a push, GitHub can briefly retain the prior scoreboard (and its blocking
+            # states) while the new build is queued; dispatching `fix` in that window burns a per-head
+            # attempt against stale evidence and can exhaust the recovery allowance before re-review.
+            # `fix-ci`/`bump` own red builds, so keep this gate local to the review-fix stage and explain
+            # the wait in the normal diagnostic stream.
+            if not p.build_success:
+                sv.fix_waiting.append(
+                    (
+                        p.number,
+                        "authoritative build is not green yet — waiting for CI before tending review findings",
+                    )
+                )
+                continue
             meta = rs.gh_meta(p.number)
             blocking = rs.ledger_blocking(p.number, p.head_oid)
             per_head = counters.read(f"fix-{p.number}-{p.head_oid[:12]}")
@@ -817,19 +843,28 @@ def survey(
                 blocking,
                 per_head,
                 pending_contest=pending_contest,
+                retry_exhausted_fixes=retry_exhausted_fixes,
             )
             if disp == "skip":
                 continue
             if disp == "actionable":
                 c = Candidate(
-                    p.number, p.head_oid, "blocking review at head", attempts=per_head, budget=MAX_FIX_ATTEMPTS
+                    p.number,
+                    p.head_oid,
+                    "blocking review at head",
+                    attempts=per_head,
+                    budget=0 if retry_exhausted_fixes else MAX_FIX_ATTEMPTS,
                 )
                 sv.needs_fix.actionable.append(c)
                 continue
             sv.fix_waiting.append((p.number, why))
             if disp == "exhausted":
                 c = Candidate(
-                    p.number, p.head_oid, "blocking review at head", attempts=per_head, budget=MAX_FIX_ATTEMPTS
+                    p.number,
+                    p.head_oid,
+                    "blocking review at head",
+                    attempts=per_head,
+                    budget=0 if retry_exhausted_fixes else MAX_FIX_ATTEMPTS,
                 )
                 sv.needs_fix.suppressed.append(c)
 
@@ -844,7 +879,12 @@ def survey(
         per_pr = counters.read(f"ci-pr-{p.number}")
         c.attempts, c.budget = per_head, MAX_CI_ATTEMPTS
         if per_head >= MAX_CI_ATTEMPTS or per_pr >= MAX_CI_PR_ATTEMPTS:
-            sv.red_ci.suppressed.append(c)
+            if retry_exhausted_fixes:
+                c.reason = "build failed at head (retry override)"
+                c.budget = 0
+                sv.red_ci.actionable.append(c)
+            else:
+                sv.red_ci.suppressed.append(c)
         else:
             sv.red_ci.actionable.append(c)
 

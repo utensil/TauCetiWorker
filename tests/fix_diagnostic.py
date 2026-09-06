@@ -32,8 +32,15 @@ def meta(data, provenance="fresh"):
     return tc.Meta(data, provenance)
 
 
-def disp(meta_obj, head=HEAD, build_success=True, blocking=False, per_head=0):
-    return tc.fix_disposition(meta_obj, head, build_success, blocking, per_head)
+def disp(meta_obj, head=HEAD, build_success=True, blocking=False, per_head=0, retry_exhausted_fixes=False):
+    return tc.fix_disposition(
+        meta_obj,
+        head,
+        build_success,
+        blocking,
+        per_head,
+        retry_exhausted_fixes=retry_exhausted_fixes,
+    )
 
 
 def check(name, got, want_disp, want_substr=None):
@@ -76,6 +83,18 @@ check(
     disp(meta({"head_sha": HEAD}), blocking=True, per_head=MAX),
     "exhausted",
     f"{MAX}/{MAX}",
+)
+check(
+    "blocking at head, attempts spent with owned recovery override -> actionable",
+    disp(meta({"head_sha": HEAD}), blocking=True, per_head=MAX, retry_exhausted_fixes=True),
+    "actionable",
+    "retry override",
+)
+check(
+    "blocking at head, owned recovery override remains unlimited",
+    disp(meta({"head_sha": HEAD}), blocking=True, per_head=MAX + 1000, retry_exhausted_fixes=True),
+    "actionable",
+    "unlimited owned retries",
 )
 
 # --- waiting: head matches but nothing blocks ----------------------------------------------------
