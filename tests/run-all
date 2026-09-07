@@ -30,6 +30,7 @@ RUN_STDLIB=(
   bubble_version.py
   branch_claim_repo.py
   build_status_rollup.py
+  checkout_lock.py
   claude_config_dir.py
   claude_keychain.py
   claims_repo.py
