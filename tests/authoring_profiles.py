@@ -3,6 +3,7 @@
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -231,6 +232,31 @@ try:
         "codex", cli_model="gpt-5.6-sol", resolved_fallback_model="gpt-5.6-terra"
     )
     check("loop child restores fallback eligibility", child_profile.fallback_model, "gpt-5.6-terra")
+
+    # A real turn can encounter model capacity after its entitlement probe passed. Retry that exact
+    # host-side candidate once with the declared fallback, without making the outer worker repeat its
+    # checkout, merge, and validation work.
+    saved_run_agent_proc = tc.agents.run_agent_proc
+    capacity_models = []
+
+    def capacity_then_success(argv, **_kwargs):
+        model = argv[argv.index("--model") + 1]
+        capacity_models.append(model)
+        if len(capacity_models) == 1:
+            tc.agents._LAST_AGENT_FAILURE = "provider model capacity unavailable"
+            return 1
+        tc.agents._LAST_AGENT_FAILURE = None
+        return 0
+
+    tc.agents.run_agent_proc = capacity_then_success
+    try:
+        with tempfile.TemporaryDirectory(prefix="authoring-capacity-") as raw:
+            capacity_rc = tc.run_agent_host(Path(raw), "PROMPT", codex, Path(raw) / "logs")
+    finally:
+        tc.agents.run_agent_proc = saved_run_agent_proc
+        tc.agents._LAST_AGENT_FAILURE = None
+    check("capacity fallback succeeds in the same host round", capacity_rc, 0)
+    check("capacity fallback preserves model order", capacity_models, ["gpt-5.6-sol", "gpt-5.6-terra"])
 finally:
     for key, value in saved_env.items():
         if value is None:

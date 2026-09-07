@@ -327,7 +327,10 @@ def resolve_codex_model_access(cfg: Config, profile: AuthoringProfile) -> Author
             )
 
     if available:
-        return replace(profile, fallback_model=None)
+        # Entitlement and instantaneous serving capacity are different. Keep the declared fallback on
+        # an entitled primary so run_agent_host can recover when the real turn, unlike this tiny probe,
+        # is rejected because that model is temporarily full.
+        return profile
     log(f"codex: {profile.model} is unavailable to this subscription; using {fallback}")
     return replace(profile, model=fallback, model_source="subscription fallback", fallback_model=None)
 
@@ -624,7 +627,7 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
     if os.environ.get("TAUCETI_AGENT_ECHO"):
         print(f"HOST cwd={cwd}\n  " + " ".join(_shq(a) for a in argv))
         return 0
-    return run_agent_proc(
+    rc = run_agent_proc(
         argv,
         env=env,
         cwd=cwd,
@@ -632,6 +635,32 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
         label=f"agent-{profile.provider}",
         provider=profile.provider,
     )
+    # A provider can accept the entitlement probe and still reject the real turn because its
+    # selected model is temporarily full.  Keep the exact checkout/candidate in place and use the
+    # profile's declared fallback immediately; this is the same model-swapping resilience used by
+    # the interactive harness, and avoids throwing away a validated round just to wait for capacity.
+    if rc != 0 and profile.provider == "codex" and profile.fallback_model:
+        if _LAST_AGENT_FAILURE == "provider model capacity unavailable":
+            fallback = replace(
+                profile,
+                model=profile.fallback_model,
+                model_source="capacity fallback",
+                fallback_model=None,
+            )
+            log(
+                f"agent-{profile.provider}: {profile.model} at capacity — retrying the same "
+                f"candidate with {fallback.model}"
+            )
+            fallback_argv, fallback_env = host_agent_argv(prompt, fallback)
+            rc = run_agent_proc(
+                fallback_argv,
+                env=fallback_env,
+                cwd=cwd,
+                logdir=logdir,
+                label=f"agent-{fallback.provider}-fallback",
+                provider=fallback.provider,
+            )
+    return rc
 
 
 # Provider statuses that mean "the service could not serve this request right now", as opposed to
@@ -790,13 +819,17 @@ def run_agent_proc(
 
     def classify_rendered_failure() -> str | None:
         # A refund asserts that the agent never ran. Structured work events are stronger evidence
-        # than transcript length, while a final structured provider diagnostic is stronger evidence
-        # than Bubble prelude lines. A retry event alone is deliberately not terminal evidence.
-        if provider in {"codex", "claude"} and renderer.saw_work:
-            return None
+        # than transcript length, except for Codex's exact terminal capacity diagnostic: the CLI can
+        # emit a reasoning/assistant preamble before the provider rejects the selected model. Treat
+        # that definitive terminal event as capacity before the generic saw-work guard.
         classification_text = "\n".join(tail)
         if renderer.terminal_failure_final and renderer.terminal_failure_text:
             classification_text = renderer.terminal_failure_text
+            terminal_reason = classify_agent_failure(classification_text)
+            if terminal_reason == "provider model capacity unavailable":
+                return terminal_reason
+        if provider in {"codex", "claude"} and renderer.saw_work:
+            return None
         return classify_agent_failure(classification_text)
 
     if os.environ.get("TAUCETI_STREAM"):

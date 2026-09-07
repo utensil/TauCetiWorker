@@ -98,6 +98,7 @@ def run(sequence, *, repeat=False, explicit=False):
 
 selected, again, error, calls, remaining = run([OK], repeat=True)
 check("successful Sol probe selects Sol", (selected.model, error), (SOL, None))
+check("successful Sol probe retains capacity fallback", selected.fallback_model, TERRA)
 check("successful Sol access is cached", (again.model, len(calls), len(remaining)), (SOL, 1, 0))
 argv, kwargs = calls[0]
 check("probe uses the requested Sol model", argv[argv.index("--model") + 1], SOL)
@@ -114,6 +115,7 @@ check("both confirmations probe Sol only", [c[0][c[0].index("--model") + 1] for 
 
 selected, _, error, calls, _ = run([UNAVAILABLE, OK])
 check("a successful confirmation keeps Sol", (selected.model, len(calls), error), (SOL, 2, None))
+check("a successful confirmation retains capacity fallback", selected.fallback_model, TERRA)
 
 for name, outcome in (
     ("ordinary failure", ORDINARY),
