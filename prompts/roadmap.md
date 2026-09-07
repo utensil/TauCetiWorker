@@ -85,7 +85,7 @@ Never downgrade to a lookalike: a weakened statement, a degenerate special case,
 
 ## Submit
 You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`): the branch is pushed there, and the PR is opened from your fork to `TauCetiProject/TauCeti:main`. You do not need write access to the canonical repo. (The wrappers are already configured to push to your fork — just run them.)
-- Create a branch `roadmap/<short-slug>-__WORKERID__` off `main` (the `-__WORKERID__` suffix keeps concurrent workers on one account from colliding). Commit (message `feat: <subject>`; end the body with `Co-Authored-By: __AGENT__ <noreply@github.com>`).
+- Create a branch `roadmap/<short-slug>-__WORKERID__` off `main` (the `-__WORKERID__` suffix keeps concurrent workers on one account from colliding). Commit with an informative conventional subject (`feat: <subject>`) and a substantive body explaining what changed, why, and the consumer/boundary. Do not add an AI co-author trailer or literal `\\n` escapes.
 - Push the new branch to your fork with the project's safe wrapper — and ONLY the wrapper:
   ```
   "__BIN__/git-safe-push" roadmap/<short-slug>-__WORKERID__
