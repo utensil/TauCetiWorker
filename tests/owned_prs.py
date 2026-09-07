@@ -108,7 +108,7 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     gh.pr_list = lambda fields: [green_owned, green_unrelated]
     consulted = []
     maintenance_rs = SimpleNamespace(
-        gh_meta=lambda n: (consulted.append(n) or SimpleNamespace(data={}, provenance="missing")),
+        gh_meta=lambda n: consulted.append(n) or SimpleNamespace(data={}, provenance="missing"),
         ledger_clean_head=lambda *_args: "",
         ledger_blocking=lambda *_args: False,
         inflight_review=lambda *_args: set(),
