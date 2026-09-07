@@ -56,9 +56,21 @@ validate_spinrep_body() {
     footer="$(awk 'NF { last=$0 } END { print last }' <<<"$body")"
     [[ "$footer" == '<sub>🤖 GPT-5.6 Sol high '* ]] \
         || die "SpinRep PR body must end with the GPT-5.6 Sol/high provenance footer"
-    for token in "TauCetiWorker @ [" "rubrics @ [" "local review @ [" "ut-lean-golf @ [" "addressed:" "fixed:"; do
-        [[ "$footer" == *"$token"* ]] || die "SpinRep provenance footer is missing '$token'"
+    for project in TauCetiWorker TauCetiReview formal-land; do
+        [[ "$footer" == *"$project"* ]] || die "SpinRep provenance footer is missing '$project'"
     done
+    grep -qE 'TauCetiWorker @ \[[0-9a-f]{7,40}\]\(https://github\.com/utensil/TauCetiWorker/commit/[0-9a-f]{7,40}\)' <<<"$footer" \
+        || die "SpinRep footer needs a real TauCetiWorker commit link"
+    grep -qE 'rubrics @ \[[0-9a-f]{7,40}\]\(https://github\.com/utensil/TauCetiReview/commit/[0-9a-f]{7,40}\)' <<<"$footer" \
+        || die "SpinRep footer needs a real TauCetiReview rubrics commit link"
+    grep -qE 'local review @ \[[0-9a-f]{7,40}\]\(https://github\.com/utensil/formal-land/commit/[0-9a-f]{7,40}\)' <<<"$footer" \
+        || die "SpinRep footer needs a real local-review skill commit link"
+    ! grep -qE 'ut-lean-golf|provider error|unknown_error' <<<"$footer" \
+        || die "SpinRep footer must not contain golf provenance or provider-error text"
+    grep -qE 'fixed:[[:space:]]+[^;]+;[[:space:]]+addressed:[[:space:]]+[^<]+' <<<"$footer" \
+        || die "SpinRep footer needs fixed then addressed rubric lists"
+    ! grep -qE '\[(WORKER_SHA|RUBRICS_SHA|REVIEW_SKILL_SHA|GOLF_SHA|canonical roadmap area|claimed-target-slug)\]' <<<"$body" \
+        || die "SpinRep PR body still contains an unreplaced template placeholder"
     ! grep -qF '\n' <<<"$body" \
         || die "SpinRep PR body contains a literal newline escape"
 }
