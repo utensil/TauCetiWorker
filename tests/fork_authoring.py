@@ -136,9 +136,12 @@ def test_fixlike():
     c = types.SimpleNamespace(pr=7, head="dead")
     cap = {}
     tc.work_units.run_in_bubble = lambda w, target, prompt, opts, **k: cap.update(target=target, **k) or 0
+    fixlike_root = Path(tempfile.mkdtemp(prefix="fixlike-state-"))
+    subprocess.run(["git", "init", "-q", str(fixlike_root)], check=True)
     w = types.SimpleNamespace(
         claims=types.SimpleNamespace(begin_branch_work=lambda *a: True),
         rs=types.SimpleNamespace(bust=lambda *a: None),
+        cfg=types.SimpleNamespace(state=fixlike_root, checkout=fixlike_root),
     )
     tc.work_units._do_fixlike(w, sv, c, opts, True, prompt_file="fix.md", label="fix")
     check("fixlike: fork head -> allow_push=owner/repo", cap.get("allow_push") == "alice/TauCeti")
