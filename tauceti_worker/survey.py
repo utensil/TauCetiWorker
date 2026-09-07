@@ -627,6 +627,7 @@ def survey(
     tend_scope: str | None = None,
     max_open_prs: int | None = None,
     retry_exhausted_fixes: bool = False,
+    review_enabled: bool = True,
 ) -> Survey:
     """Classify every open PR per work-kind. Read-only — performs no actions.
 
@@ -729,6 +730,11 @@ def survey(
     #    bounded by the contest caps). The only worker-side stop is the review-ERROR cap: a PR whose
     #    review keeps erroring without posting a verdict is escalated, not silently dropped.
     for p in nondraft:
+        # Maintenance-only workers never dispatch `review`; do not hydrate scoreboards or in-flight
+        # markers for unrelated PRs. Those paginated comment reads are model-free, but one stalled
+        # `gh api` call used to hold the entire round lock and starve the worker's owned queue.
+        if not review_enabled and p not in tended:
+            continue
         if not p.build_success:
             continue
         if not deep:

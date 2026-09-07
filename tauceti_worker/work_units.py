@@ -229,6 +229,7 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         tend_scope=getattr(opts, "tend_scope", None),
         max_open_prs=getattr(opts, "max_open_prs", None),
         retry_exhausted_fixes=getattr(opts, "retry_exhausted_fixes", False),
+        review_enabled=want(opts.only, "review"),
     )
     if sv.github_failed:
         detail = " ".join((sv.errors[0] if sv.errors else "GitHub survey failed").split())[:500]
