@@ -1382,6 +1382,7 @@ def run_in_bubble(
         "TAUCETI_PUSH_REMOTE",
         "TAUCETI_TARGET_MARKER",
         "TAUCETI_REQUIRE_TARGET_MARKER",
+        "TAUCETI_PR_BODY_FORMAT",
         "TAUCETI_PR_RECEIPT_FILE",
     ):
         val = os.environ.get(var)

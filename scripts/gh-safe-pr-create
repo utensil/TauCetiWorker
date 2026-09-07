@@ -16,6 +16,7 @@ set -uo pipefail
 CLAIM_KEY="${TAUCETI_AUTHOR_CLAIM_KEY:-}"
 MARKER="${TAUCETI_TARGET_MARKER:-}"
 REQUIRE_MARKER="${TAUCETI_REQUIRE_TARGET_MARKER:-}"   # 1 ⇒ body must carry SOME <!--tauceti-target--> marker
+BODY_FORMAT="${TAUCETI_PR_BODY_FORMAT:-}"             # spinrep-v1 ⇒ enforce the established SpinRep body
 CLAIM_SH="${TAUCETI_CLAIM_SH:-$(cd "$(dirname "$0")" && pwd)/claim.sh}"
 
 die() { echo "gh-safe-pr-create: $*" >&2; exit 1; }
@@ -31,6 +32,35 @@ pr_body_from_args() {
         prev="$a"
     done
     printf '%s' "$b"
+}
+
+# SpinRep's body is deliberately checked at the only public-creation choke point.  This is opt-in so
+# the shared Worker remains compatible with older projects, while every SpinRep seed worker can fail
+# closed before an abbreviated body reaches GitHub.
+validate_spinrep_body() {
+    local body="$1" footer
+    [[ "$body" == "This PR "* ]] \
+        || die "SpinRep PR body must open with a concise 'This PR …' summary"
+    grep -qE '^Roadmap:[[:space:]]+[^[:space:]].*$' <<<"$body" \
+        || die "SpinRep PR body must contain a standalone 'Roadmap: <area>' line"
+    for section in "## Summary" "## Roadmap target" "## Verification" "## Scale and generality" "## Scope"; do
+        grep -qxF "$section" <<<"$body" \
+            || die "SpinRep PR body is missing the required section '$section'"
+    done
+    for field in Consumes Provides Fits Boundary; do
+        grep -qE "^- \\*\\*${field}:\\*\\*[[:space:]]+[^[:space:]].*$" <<<"$body" \
+            || die "SpinRep PR body is missing the non-empty Scope bullet '${field}'"
+    done
+    grep -qE '<!--tauceti-target:v1 \{[^}]*"id"[[:space:]]*:[[:space:]]*"[^"]+"[^}]*\}-->' <<<"$body" \
+        || die "SpinRep PR body is missing its target marker"
+    footer="$(awk 'NF { last=$0 } END { print last }' <<<"$body")"
+    [[ "$footer" == '<sub>🤖 GPT-5.6 Sol high '* ]] \
+        || die "SpinRep PR body must end with the GPT-5.6 Sol/high provenance footer"
+    for token in "TauCetiWorker @ [" "rubrics @ [" "local review @ [" "ut-lean-golf @ [" "addressed:" "fixed:"; do
+        [[ "$footer" == *"$token"* ]] || die "SpinRep provenance footer is missing '$token'"
+    done
+    ! grep -qF '\n' <<<"$body" \
+        || die "SpinRep PR body contains a literal newline escape"
 }
 
 # 1) Author claim must still be ours (else another agent is authoring this target — abandon).
@@ -54,6 +84,11 @@ elif [[ "$REQUIRE_MARKER" == "1" ]]; then
         || die "PR body is missing a target marker. Add a line like:
   <!--tauceti-target:v1 {\"focus\":\"<area>\",\"id\":\"<slug>\"}-->
 It lets other agents and the dup-sweeper recognize which roadmap target this PR authors."
+fi
+
+if [[ "$BODY_FORMAT" == "spinrep-v1" ]]; then
+    body="$(pr_body_from_args "$@")"
+    validate_spinrep_body "$body"
 fi
 
 echo "gh-safe-pr-create: gh pr create $*" >&2
