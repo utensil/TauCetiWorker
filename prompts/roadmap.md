@@ -97,5 +97,10 @@ You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`)
   ```
 Do NOT run a raw `gh pr create`. The PR body must open with a paragraph beginning "This PR …", cite the exact roadmap target, include a standalone `Roadmap: <target-roadmap>` line (using the canonical top-level directory, never `any`), and, after an upstream switch, a standalone `Consumer roadmap: <designated-roadmap>` line plus the explicit dependency edge. It **includes the `<!--tauceti-target:v1 …-->` marker from the claim step** (the wrapper rejects the PR without it), names any Mathlib infrastructure you vendored (with attribution), and uses these required sections: `## Summary`, `## Roadmap target`, `## Verification`, `## Scale and generality`, and `## Scope`. The Scope section has exactly four concise bullets labelled `Consumes`, `Provides`, `Fits`, and `Boundary`. End with the provenance footer containing the actual `GPT-5.6 Sol high`, TauCetiWorker, rubrics, and local-review skill revisions, followed by `fixed:` then `addressed:` lists. `fixed` is the same rubric set as `addressed`; never include provider-error diagnostics or golf-tool provenance. Title `feat: <subject>`. Do not post Discord updates; the model-free observer reports the Worker lifecycle.
 
-## Report a submitted PR
-After opening a PR, end with a concise summary: the target and target roadmap you chose, the designated milestone it serves, why it was the most effective current step towards that milestone, the file(s) added and line count, the PR number/URL, the rubrics you read, and what your own review of the diff found and changed. You don't need to make claims about `lake build` or `lake exe axioms`; CI will handle that.
+## Return the result to the Worker
+Return a concise summary to the Worker host: the target and roadmap, the
+milestone it serves, why it was the most effective current step, files and
+line count, PR URL when one was created, rubrics read, and findings changed.
+Do not post a Discord report; the model-free observer publishes lifecycle
+events from the Worker log and structured runtime status. You don't need to
+make claims about `lake build` or `lake exe axioms`; CI will handle that.
