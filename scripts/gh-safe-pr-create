@@ -65,10 +65,17 @@ validate_spinrep_body() {
         || die "SpinRep footer needs a real TauCetiReview rubrics commit link"
     grep -qE 'local review @ \[[0-9a-f]{7,40}\]\(https://github\.com/utensil/formal-land/commit/[0-9a-f]{7,40}\)' <<<"$footer" \
         || die "SpinRep footer needs a real local-review skill commit link"
-    ! grep -qE 'ut-lean-golf|provider error|unknown_error' <<<"$footer" \
-        || die "SpinRep footer must not contain golf provenance or provider-error text"
+    ! grep -qE 'ut-lean-golf|provider error|unknown_error' <<<"$body" \
+        || die "SpinRep PR body must not contain golf provenance or provider-error text"
     grep -qE 'fixed:[[:space:]]+[^;]+;[[:space:]]+addressed:[[:space:]]+[^<]+' <<<"$footer" \
         || die "SpinRep footer needs fixed then addressed rubric lists"
+    local fixed_list addressed_list
+    fixed_list="${footer#*fixed: }"
+    fixed_list="${fixed_list%%; addressed:*}"
+    addressed_list="${footer#*; addressed: }"
+    addressed_list="${addressed_list%%</sub>*}"
+    [[ "$fixed_list" == "$addressed_list" ]] \
+        || die "SpinRep footer requires fixed and addressed to name the same rubric set"
     ! grep -qE '\[(WORKER_SHA|RUBRICS_SHA|REVIEW_SKILL_SHA|GOLF_SHA|canonical roadmap area|claimed-target-slug)\]' <<<"$body" \
         || die "SpinRep PR body still contains an unreplaced template placeholder"
     ! grep -qF '\n' <<<"$body" \
