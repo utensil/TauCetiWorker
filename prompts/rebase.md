@@ -33,7 +33,7 @@ session id anyway, rerun the command with a longer foreground timeout rather tha
 **Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
 
 ## Submit
-- Commit the merge/resolution (if `git merge` left a merge commit, keep its default message; otherwise `<type>: <subject>`, ending the body with `Co-Authored-By: __AGENT__ <noreply@github.com>`).
+- Commit the merge/resolution (if `git merge` left a merge commit, keep its default message; otherwise use an informative conventional subject (`<type>: <subject>`) and a substantive body). Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:
   ```
   "__BIN__/git-safe-push"

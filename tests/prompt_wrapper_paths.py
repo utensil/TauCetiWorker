@@ -106,6 +106,16 @@ def main():
         )
     check("every bundled prompt has a call site", {p.name for p in PROMPTS.glob("*.md")} == set(CALL_SITES))
 
+    # Commit messages are public project history: every authoring/maintenance prompt must require
+    # real line breaks and must not ask the model to add an AI co-author trailer.
+    for name in CALL_SITES:
+        prompt = (PROMPTS / name).read_text()
+        check(f"{name}: does not require an AI co-author", "end the body with `Co-Authored-By:" not in prompt)
+        check(
+            f"{name}: forbids AI trailers and escaped newlines",
+            "AI co-author trailer" in prompt and "literal" in prompt and "escapes" in prompt,
+        )
+
     # 4) Shim expiry is an autonomous repair input, not a notification-only dead end. Both workers
     # reproduce and verify the gate, and both know the registry is part of the source-only fix.
     shim_command = "python3 scripts/check-expired-mathlib-shims.py"
