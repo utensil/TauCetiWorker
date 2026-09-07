@@ -791,7 +791,132 @@ def _sync_review_outbox(w: Worker, pr: int) -> int:
     return p.returncode
 
 
-def _refund_infra_failure(w, c, label: str, charged: tuple[str, ...]) -> None:
+def _resume_paths(w: Worker, c: Candidate) -> tuple[Path, str, str]:
+    """Return the durable checkpoint metadata path and git refs for one exact PR head."""
+    token = f"{c.pr}-{c.head[:12]}"
+    return (
+        w.cfg.state / "resume" / f"{token}.json",
+        f"refs/tauceti-resume/{c.pr}/{c.head}",
+        f"refs/tauceti-resume-stash/{c.pr}/{c.head}",
+    )
+
+
+def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
+    """Preserve a changed checkout after a provider outage so the next round can resume it.
+
+    A provider-capacity failure is not a reason to throw away a validated local commit. The checkpoint
+    is private, keyed by the exact public head, and only restored when that head is still current. A
+    dirty tree is stashed (including untracked source files) behind a durable private ref; a committed
+    candidate is retained by its exact commit ref. Failure to checkpoint never masks the original
+    provider diagnostic.
+    """
+    co = w.cfg.checkout
+    try:
+        head = _checkout_head(w.cfg)
+        if not head:
+            return
+        status = subprocess.run(
+            ["git", "-C", str(co), "status", "--porcelain"], capture_output=True, text=True, timeout=30
+        )
+        dirty = bool((status.stdout or "").strip())
+        if head == c.head and not dirty:
+            return
+        meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+        subprocess.run(["git", "-C", str(co), "update-ref", commit_ref, head], check=True, timeout=30)
+        stash = None
+        if dirty:
+            made = subprocess.run(
+                ["git", "-C", str(co), "stash", "push", "--include-untracked", "--quiet", "-m", f"tauceti-resume {c.pr}"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if made.returncode == 0:
+                raw = subprocess.run(
+                    ["git", "-C", str(co), "rev-parse", "refs/stash"], capture_output=True, text=True, timeout=30
+                )
+                if raw.returncode == 0 and raw.stdout.strip():
+                    stash = raw.stdout.strip()
+                    subprocess.run(["git", "-C", str(co), "update-ref", stash_ref, stash], check=True, timeout=30)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = meta_path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "pr": c.pr,
+                    "public_head": c.head,
+                    "candidate_head": head,
+                    "commit_ref": commit_ref,
+                    "stash_ref": stash_ref if stash else None,
+                    "stage": label,
+                    "created_at": int(time.time()),
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, meta_path)
+        log(f"  {label} #{c.pr}: checkpointed local candidate @{head[:12]} for provider-capacity resume")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        log(f"  {label} #{c.pr}: could not checkpoint local candidate ({exc})")
+
+
+def _restore_resume(w: Worker, c: Candidate, p) -> bool:
+    """Restore a private exact-head checkpoint after prepare_checkout reset the worker checkout."""
+    meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+    try:
+        if not meta_path.is_file():
+            return False
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("public_head") != c.head or meta.get("pr") != c.pr:
+            return False
+        candidate_ref = str(meta.get("commit_ref") or commit_ref)
+        candidate_head = str(meta.get("candidate_head") or "")
+        verify = subprocess.run(
+            ["git", "-C", str(w.cfg.checkout), "merge-base", "--is-ancestor", c.head, candidate_ref],
+            timeout=30,
+        )
+        if verify.returncode != 0 or not candidate_head:
+            log(f"  resume #{c.pr}: checkpoint is not based on current public head; leaving it preserved")
+            return False
+        branch = p.head_ref
+        if subprocess.run(
+            ["git", "-C", str(w.cfg.checkout), "checkout", "-q", "-B", branch, candidate_ref], timeout=60
+        ).returncode:
+            return False
+        stash = meta.get("stash_ref")
+        if stash:
+            applied = subprocess.run(
+                ["git", "-C", str(w.cfg.checkout), "stash", "apply", "--index", str(stash)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if applied.returncode:
+                log(f"  resume #{c.pr}: checkpoint stash did not apply; candidate remains in {candidate_ref}")
+                subprocess.run(["git", "-C", str(w.cfg.checkout), "reset", "-q", "--hard", "origin/main"], timeout=60)
+                return False
+        log(f"  resume #{c.pr}: restored candidate @{candidate_head[:12]} (public CAS remains {c.head[:12]})")
+        return True
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        log(f"  resume #{c.pr}: checkpoint restore skipped ({exc})")
+        return False
+
+
+def _clear_resume(w: Worker, c: Candidate) -> None:
+    """Remove only the exact-head checkpoint after a productive round."""
+    meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+    try:
+        subprocess.run(["git", "-C", str(w.cfg.checkout), "update-ref", "-d", commit_ref], timeout=30)
+        subprocess.run(["git", "-C", str(w.cfg.checkout), "update-ref", "-d", stash_ref], timeout=30)
+        meta_path.unlink(missing_ok=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _refund_infra_failure(w, c, label: str, charged: tuple[str, ...], reason: str | None = None) -> None:
     """A provider outage must not spend a PR's attempt budget. Hand back every counter this round
     charged, then raise NoProgress so the loop's escalating back-off retries later.
 
@@ -812,7 +937,7 @@ def _refund_infra_failure(w, c, label: str, charged: tuple[str, ...]) -> None:
     backstop indefinitely by moving the head. The counters live in the worker's own state, so this is
     per worker rather than fleet-wide; a fleet-wide bound would need shared state it does not have.
     """
-    reason = take_last_agent_infra_failure()
+    reason = reason or take_last_agent_infra_failure()
     if not reason:
         return
     refunds = w.counters.incr(f"infra-{label}-{c.pr}")
@@ -875,22 +1000,30 @@ def _do_fixlike(
         co = w.cfg.checkout
         # Capture the checkout's git chatter ("Switched to a new branch …", "set up to track …") instead
         # of letting it spill into the main log; surface a one-line summary, and the stderr only on failure.
-        chk = subprocess.run(["gh", "pr", "checkout", str(pr), "--force"], cwd=str(co), capture_output=True, text=True)
-        if chk.returncode:
-            detail = ((chk.stderr or "") + (chk.stdout or "")).strip()[-200:]
-            log(f"  {label} #{pr}: gh pr checkout failed — skipping this attempt ({detail})")
-            report_failure(f"{label} #{pr}: gh pr checkout failed: {detail or 'no diagnostic'}", code=1)
-            return 1
+        resumed = _restore_resume(w, c, p)
+        if not resumed:
+            chk = subprocess.run(["gh", "pr", "checkout", str(pr), "--force"], cwd=str(co), capture_output=True, text=True)
+            if chk.returncode:
+                detail = ((chk.stderr or "") + (chk.stdout or "")).strip()[-200:]
+                log(f"  {label} #{pr}: gh pr checkout failed — skipping this attempt ({detail})")
+                report_failure(f"{label} #{pr}: gh pr checkout failed: {detail or 'no diagnostic'}", code=1)
+                return 1
         rev = subprocess.run(["git", "-C", str(co), "rev-parse", "HEAD"], capture_output=True, text=True)
         checked = rev.stdout.strip() or head
         w.rc.change_base_head = checked
-        os.environ["TAUCETI_PUSH_EXPECT"] = checked  # CAS against what we actually checked out
+        # A resumed candidate is ahead of the remote PR head. The push CAS must compare against the
+        # exact public head that admitted this round, not against the private checkpoint commit.
+        os.environ["TAUCETI_PUSH_EXPECT"] = head if resumed else checked
         log(f"  {label} #{pr}: checked out @ {checked[:12]}")
         rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
     if rc == 0:
         w.rs.bust(pr)
+        _clear_resume(w, c)
     else:
-        _refund_infra_failure(w, c, label, charged)  # raises NoProgress when the provider was at fault
+        reason = take_last_agent_infra_failure()
+        if reason and ("capacity" in reason or "could not reach" in reason or "provider returned" in reason):
+            _checkpoint_resume(w, c, label)
+        _refund_infra_failure(w, c, label, charged, reason=reason)  # raises NoProgress when provider fault
     return rc
 
 
