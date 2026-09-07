@@ -85,6 +85,16 @@ def main() -> int:
     check("non-limit did not sleep", slept, [])
     check("non-limit made one call", len(fr.calls), 1)
 
+    # A wedged gh subprocess must fail closed rather than hold the round lock indefinitely.
+    class TimeoutRun:
+        def __call__(self, argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout", 0))
+
+    tc.github.run = TimeoutRun()
+    p = tc.gh_run(["gh", "api", "/repos/example/repo/pulls/1/comments"])
+    check("hung gh command returns a failure", p.returncode, 124)
+    check("hung gh command explains timeout", "timed out" in p.stderr, True)
+
     # Transport/server truncation is retryable: it is exactly what a large GraphQL listing surfaces as
     # when GitHub cancels a stream or returns a gateway timeout. The retry is short and bounded.
     fr, slept = with_stubs([(1, "unexpected EOF"), (0, "")])

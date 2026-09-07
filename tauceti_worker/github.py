@@ -17,6 +17,7 @@ from .constants import (
     _GH_SECONDARY_RE,
     CLAIMS,
     CONTEST_CLAIM_EMOJI,
+    GH_COMMAND_TIMEOUT,
     GH_INROUND_WAIT,
     GH_SECONDARY_BASE,
     TAUCETI,
@@ -198,6 +199,7 @@ def run(
     capture: bool = True,
     check: bool = False,
     input_text: str | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
@@ -207,6 +209,7 @@ def run(
         capture_output=capture,
         input=input_text,
         check=check,
+        timeout=timeout,
     )
 
 
@@ -299,7 +302,19 @@ def gh_run(
     secondary_attempt = 0
     transient_attempt = 0
     while True:
-        p = run(argv, cwd=cwd)
+        try:
+            p = run(argv, cwd=cwd, timeout=GH_COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            # Treat a hung read exactly like any other non-rate-limit GitHub failure. Callers will
+            # fail closed (or retry when explicitly allowed), and the loop can move on to another
+            # round instead of holding round.lock forever.
+            detail = " ".join(str(part) for part in argv)
+            p = subprocess.CompletedProcess(
+                argv,
+                124,
+                stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
+                stderr=f"gh command timed out after {GH_COMMAND_TIMEOUT}s: {detail}",
+            )
         if p.returncode == 0:
             return p
         text = (p.stderr or "") + "\n" + (p.stdout or "")
