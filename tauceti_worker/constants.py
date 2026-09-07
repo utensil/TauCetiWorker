@@ -151,6 +151,11 @@ GH_MIN_BUDGET = int(os.environ.get("TAUCETI_GH_MIN_BUDGET", "200"))  # core requ
 
 GH_INROUND_WAIT = int(os.environ.get("TAUCETI_GH_INROUND_WAIT", "900"))  # cap on gh_run's in-place wait (15 min)
 
+# A hung `gh` subprocess must not strand the whole survey indefinitely. This is separate from the
+# in-round rate-limit wait: it bounds one network call, while the caller's retry/backoff policy remains
+# authoritative. Operators can raise it for unusually large responses, but a finite default is mandatory.
+GH_COMMAND_TIMEOUT = int(os.environ.get("TAUCETI_GH_COMMAND_TIMEOUT", "120"))
+
 GH_SECONDARY_BASE = 60  # first secondary-limit sleep when no Retry-After is given (then exponential)
 
 _GH_PRIMARY_RE = re.compile(r"(?:API )?rate limit exceeded|rate limit.*exceeded", re.I)
