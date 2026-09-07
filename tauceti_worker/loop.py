@@ -3,6 +3,7 @@ timeout, then settle (short pause if productive, escalating back-off otherwise).
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -20,6 +21,71 @@ from .runtime_status import report_runtime, runtime_snapshot
 
 class _LoopTerminated(KeyboardInterrupt):
     """SIGTERM translated to the same teardown path as Ctrl-C, with the right exit code."""
+
+
+CAPACITY_BACKOFF = int(os.environ.get("TAUCETI_CAPACITY_BACKOFF", "900"))
+
+
+def _capacity_marker(cfg: Config):
+    state = getattr(cfg, "state", None)
+    return state / "provider-capacity-cooldown.json" if state is not None else None
+
+
+def _capacity_pause(cfg: Config) -> tuple[int, str] | None:
+    """Return remaining provider-capacity cooldown, if one survives a worker restart."""
+    path = _capacity_marker(cfg)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        until = int(data.get("until", 0))
+        if until <= int(time.time()):
+            path.unlink(missing_ok=True)
+            return None
+        return until - int(time.time()), str(data.get("reason") or "provider model capacity unavailable")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _set_capacity_pause(cfg: Config, reason: str) -> None:
+    """Persist a bounded pause after both configured Codex models reject capacity."""
+    path = _capacity_marker(cfg)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"until": int(time.time()) + CAPACITY_BACKOFF, "reason": reason}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        # The cooldown is an optimization; the terminal provider diagnosis remains visible even if the
+        # worker state directory is briefly unavailable.
+        pass
+
+
+def _clear_capacity_pause(cfg: Config) -> None:
+    path = _capacity_marker(cfg)
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _capacity_failure(snapshot: dict) -> bool:
+    """Recognize only the worker's exact terminal provider-capacity diagnosis."""
+    fields = [snapshot.get("failure_reason"), snapshot.get("detail")]
+    failure_log = snapshot.get("failure_log")
+    if failure_log:
+        try:
+            fields.append(open(failure_log, encoding="utf-8", errors="replace").read()[-4000:])
+        except OSError:
+            pass
+    return any("provider model capacity unavailable" in str(value).lower() for value in fields if value)
 
 
 def review_scope_tail(
@@ -120,6 +186,23 @@ def cmd_loop(
     signal.signal(signal.SIGTERM, terminate)
     try:
         while True:
+            # A dual-capacity failure is machine-wide and must not relaunch the same expensive survey
+            # and rebase every minute.  Keep the pause in the worker state so a manager restart does not
+            # erase it; the model-free observer can still report public-head changes during the wait.
+            paused = _capacity_pause(cfg)
+            if paused:
+                remaining, reason = paused
+                nap = max(1, min(remaining, CAPACITY_BACKOFF))
+                log(f"provider capacity cooldown: {reason} — sleeping {nap}s before retry")
+                report_runtime(
+                    "backoff",
+                    detail=f"{reason} — cooldown; no agent launch",
+                    phase=None,
+                    target=None,
+                    next_action_at=time.time() + nap,
+                )
+                time.sleep(nap)
+                continue
             report_runtime(
                 "checking-quota",
                 detail="checking provider availability",
@@ -270,6 +353,7 @@ def cmd_loop(
 
             # 3) Settle: productive → short pause; no-progress/timeout/error → escalating back-off.
             if rc == 0:
+                _clear_capacity_pause(cfg)
                 streak = 0
                 report_runtime(
                     "idle", detail="round completed", phase=None, target=None, next_action_at=time.time() + INTERROUND
@@ -286,6 +370,14 @@ def cmd_loop(
                     if published
                     else ("round timed out" if rc in (124, 137) else f"round exited with status {rc}")
                 )
+                if rc == EX_NOPROGRESS and _capacity_failure(failed):
+                    # The child already tried the configured fallback model.  Persist a longer,
+                    # restart-safe pause instead of repeatedly launching both unavailable models.
+                    _set_capacity_pause(cfg, reason)
+                    nap = CAPACITY_BACKOFF
+                    tag = "provider capacity"
+                else:
+                    _clear_capacity_pause(cfg)
                 log(f"round {tag}; no-progress streak={streak} — backing off {nap}s")
                 report_runtime(
                     "backoff",
