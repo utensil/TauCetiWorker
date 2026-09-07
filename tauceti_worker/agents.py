@@ -484,11 +484,56 @@ def prepare_checkout(cfg: Config) -> bool:
         return False
     # -f discards a prior round's leftover edits and lands us on main in one step; a plain
     # switch/checkout would refuse on a dirty tree (two noisy errors) and could leave HEAD on
-    # the old branch with only main's content. Bail if even the forced checkout fails.
-    if g("checkout", "-q", "-f", "-B", "main", "origin/main"):
+    # the old branch with only main's content. Recover one ownerless stale lock, then bail if the
+    # forced checkout still fails.
+    checkout = ["git", "-C", str(co), "checkout", "-q", "-f", "-B", "main", "origin/main"]
+    for attempt in range(2):
+        result = subprocess.run(checkout, capture_output=True, text=True, errors="replace")
+        if result.returncode == 0:
+            break
+        detail = ((result.stderr or "") + (result.stdout or "")).strip().splitlines()
+        detail = detail[-1][-240:] if detail else f"exit {result.returncode}"
+        if attempt == 0:
+            stale = _quarantine_stale_index_lock(co)
+            if stale is not None:
+                log(f"checkout: quarantined stale index lock {stale.name}; retrying")
+                continue
+        log(f"checkout: git checkout failed ({detail})")
         return False
     g("clean", "-fdxq", "-e", ".lake")
     return True
+
+
+def _quarantine_stale_index_lock(co: Path, *, min_age_s: float = 300.0) -> Path | None:
+    """Quarantine an old, ownerless Git index lock, or return None without touching it.
+
+    Git lock files carry no PID, so recovery is deliberately conservative: require an old mtime,
+    an available ``lsof`` probe that reports no holder, and an unchanged inode/size/mtime before the
+    atomic rename. A live or ambiguous lock remains fail-closed for the operator to inspect.
+    """
+    lock = co / ".git" / "index.lock"
+    try:
+        before = lock.stat()
+        if time.time() - before.st_mtime < min_age_s:
+            return None
+        lsof = subprocess.run(
+            ["lsof", "-t", "--", str(lock)], capture_output=True, text=True, errors="replace", timeout=10
+        )
+        if lsof.returncode != 1 or lsof.stdout.strip() or lsof.stderr.strip():
+            return None
+        after = lock.stat()
+        if (before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            return None
+        stamp = time.strftime("%Y%m%dT%H%M%S%z")
+        stale = lock.with_name(f"index.lock.stale-{stamp}-{os.getpid()}")
+        os.replace(lock, stale)
+        return stale
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
 
 
 def _fetch_shallow(url: str, dir: Path, ref: str = "HEAD") -> bool:
