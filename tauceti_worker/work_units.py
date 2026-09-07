@@ -826,7 +826,17 @@ def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
         stash = None
         if dirty:
             made = subprocess.run(
-                ["git", "-C", str(co), "stash", "push", "--include-untracked", "--quiet", "-m", f"tauceti-resume {c.pr}"],
+                [
+                    "git",
+                    "-C",
+                    str(co),
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "--quiet",
+                    "-m",
+                    f"tauceti-resume {c.pr}",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1002,7 +1012,9 @@ def _do_fixlike(
         # of letting it spill into the main log; surface a one-line summary, and the stderr only on failure.
         resumed = _restore_resume(w, c, p)
         if not resumed:
-            chk = subprocess.run(["gh", "pr", "checkout", str(pr), "--force"], cwd=str(co), capture_output=True, text=True)
+            chk = subprocess.run(
+                ["gh", "pr", "checkout", str(pr), "--force"], cwd=str(co), capture_output=True, text=True
+            )
             if chk.returncode:
                 detail = ((chk.stderr or "") + (chk.stdout or "")).strip()[-200:]
                 log(f"  {label} #{pr}: gh pr checkout failed — skipping this attempt ({detail})")
