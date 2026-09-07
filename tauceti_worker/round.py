@@ -37,6 +37,10 @@ class RoundContext:
         self._fd: int | None = None
         self._cleanups: list = []
         self._done = False
+        # The checkout baseline established by the selected work unit.  This is deliberately set
+        # after any target-branch checkout, not when the round starts: the shared host checkout may
+        # still be on another PR from the preceding round.
+        self.change_base_head: str | None = None
 
     def __enter__(self) -> RoundContext:
         self.cfg.state.mkdir(parents=True, exist_ok=True)

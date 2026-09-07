@@ -347,7 +347,7 @@ _MAX_CHANGED_FILES = 25
 
 
 def _checkout_head(cfg: Config) -> str | None:
-    """The checkout's HEAD before a round, or None when there is nothing to compare against."""
+    """Return the checkout's current HEAD, or None when it cannot be read."""
     try:
         p = subprocess.run(
             ["git", "-C", str(cfg.checkout), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30
@@ -576,10 +576,12 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
     log(f"→ {stage.upper()}: {what}   [{detail}]")
     report_runtime("running", phase=stage, target=what, detail=detail, next_action_at=None)
     pre = _progress_snapshot(w, c) if stage in PROGRESS_GUARDED else None
-    pre_head = _checkout_head(w.cfg) if (stage in FILE_CHANGE_STAGES and not bubble) else None
     rc = fn(w, sv, c, opts, bubble)
     if stage in FILE_CHANGE_STAGES and not bubble:
-        log_round_file_changes(w.cfg, pre_head)
+        # The work unit records its baseline immediately after it has prepared and selected the
+        # target branch.  Comparing against the shared checkout HEAD from before dispatch would
+        # count every path between two different PRs when the loop alternates targets.
+        log_round_file_changes(w.cfg, w.rc.change_base_head)
     # A model round that exits 0 but leaves no mark on GitHub did no real work. Usually benign: another
     # worker pushed the branch first and safe-push declined rather than clobber, or the agent chose not
     # to act. Surface it as no-progress (so the loop backs off) but say so plainly and point at the log.
@@ -880,6 +882,7 @@ def _do_fixlike(
             return 1
         rev = subprocess.run(["git", "-C", str(co), "rev-parse", "HEAD"], capture_output=True, text=True)
         checked = rev.stdout.strip() or head
+        w.rc.change_base_head = checked
         os.environ["TAUCETI_PUSH_EXPECT"] = checked  # CAS against what we actually checked out
         log(f"  {label} #{pr}: checked out @ {checked[:12]}")
         rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
@@ -1363,6 +1366,9 @@ def do_roadmap(w, sv, c, opts, bubble) -> int:
         else:
             if not prepare_checkout(w.cfg):
                 raise Die("checkout failed")
+            baseline = _checkout_head(w.cfg)
+            if baseline:
+                w.rc.change_base_head = baseline
             prompt = fill_prompt(
                 HERE / "prompts" / "roadmap.md",
                 ONLY=only,

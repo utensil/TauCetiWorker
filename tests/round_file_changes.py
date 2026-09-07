@@ -142,6 +142,8 @@ def main():
         {"roadmap", "fix", "fix-ci", "rebase", "bump"} == tc.work_units.FILE_CHANGE_STAGES,
     )
     check("a bubble round is skipped", "stage in FILE_CHANGE_STAGES and not bubble" in src)
+    check("the logger uses the post-checkout baseline", "w.rc.change_base_head" in src)
+    check("the logger does not snapshot the shared HEAD before dispatch", "pre_head = _checkout_head(w.cfg)" not in src)
 
     print("FAIL" if fails else "PASS")
     return 1 if fails else 0
