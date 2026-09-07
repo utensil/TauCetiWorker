@@ -91,6 +91,7 @@ cases = [
         None,
     ),
     ("colon is required", "API Error529 Overloaded", None),
+    ("codex model capacity", "Selected model is at capacity. Please try a different model.", "provider model capacity unavailable"),
 ]
 for name, text, want in cases:
     check(f"classify {name}", agents.classify_agent_failure(text), want)

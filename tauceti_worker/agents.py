@@ -651,6 +651,10 @@ _TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 529})
 # "API Error529" or an agent quoting a status number.
 _API_ERROR_RE = re.compile(r"API Error:\s*(\d{3})\b", re.I)
 
+# Codex can reject a launch before it emits an HTTP status. Keep this deliberately narrow: this is
+# the exact terminal diagnostic observed from the pinned CLI, not generic prose mentioning capacity.
+_MODEL_CAPACITY_RE = re.compile(r"\bselected model is at capacity\b", re.I)
+
 # A refund asserts "the agent never ran", so only a log with nothing in it BUT the failure qualifies.
 # The log is a combined stdout+stderr transcript: agent prose, tool output, test output, and under
 # bubble the pre-agent build. Scanning that for a status number refunds a genuine task failure whose
@@ -698,6 +702,8 @@ def classify_agent_failure(text: str) -> str | None:
         # request, a dead credential). Stop here rather than falling through to the transport
         # patterns, which could otherwise rescue a 401 that happens to mention a socket.
         return f"provider returned {status}" if status in _TRANSIENT_STATUSES else None
+    if _MODEL_CAPACITY_RE.search(hay):
+        return "provider model capacity unavailable"
     if _TRANSPORT_RE.search(hay):
         return "could not reach the provider"
     return None
