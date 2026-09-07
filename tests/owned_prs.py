@@ -29,7 +29,12 @@ def check(name, value):
 
 with TemporaryDirectory(prefix="owned-prs-") as raw:
     root = Path(raw)
-    cfg = SimpleNamespace(wid="tcwork", data_home=root / "home")
+    cfg = SimpleNamespace(
+        wid="tcwork",
+        data_home=root / "home",
+        state=root / "state",
+        store_dir=root / "store",
+    )
     owned = OwnedPRs(cfg)
     check("missing record fails closed", owned.read() is None)
     check("first add creates one-line record", owned.add(12) == {12})
@@ -95,6 +100,34 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     finally:
         survey_mod.progress_due = old_due
         gh.pr_list = old_pr_list
+
+    # A maintenance-only survey must not fetch scoreboards for unrelated open PRs.  This is the
+    # regression boundary for a hung paginated `gh api` call starving an owned PR.
+    green_owned = {**pr(3), "statusCheckRollup": [{"context": "build", "state": "SUCCESS"}]}
+    green_unrelated = {**pr(4), "statusCheckRollup": [{"context": "build", "state": "SUCCESS"}]}
+    gh.pr_list = lambda fields: [green_owned, green_unrelated]
+    consulted = []
+    maintenance_rs = SimpleNamespace(
+        gh_meta=lambda n: consulted.append(n) or SimpleNamespace(data={}, provenance="missing"),
+        ledger_clean_head=lambda *_args: "",
+        ledger_blocking=lambda *_args: False,
+        inflight_review=lambda *_args: set(),
+        newest_contest_reply=lambda *_args: None,
+    )
+    sv_maintenance = survey_mod.survey(
+        cfg,
+        gh,
+        maintenance_rs,
+        counters,
+        deep=True,
+        tend_scope="owned",
+        review_enabled=False,
+    )
+    check(
+        "maintenance survey skips unrelated review metadata",
+        consulted and set(consulted) == {3},
+    )
+
     try:
         survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="author", retry_exhausted_fixes=True)
     except ValueError as exc:
