@@ -30,6 +30,21 @@ def blocking(data, head="H"):
 
 HEAD = "H"
 cases = [
+    (
+        "errors and deferred rubrics are not author findings",
+        {"head_sha": HEAD, "states": {"naming": "green", "reuse": "error", "scope": "absent"}},
+        False,
+    ),
+    (
+        "a real finding remains actionable beside an execution error",
+        {"head_sha": HEAD, "states": {"reuse": "error", "naming": "blocking_request"}},
+        True,
+    ),
+    (
+        "an early correctness halt remains actionable",
+        {"head_sha": HEAD, "states": {"correctness": "blocking_block", "reuse": "absent"}},
+        True,
+    ),
     # (name, meta, expected)
     (
         "states blocking while runs approve (the #229 bug)",
@@ -67,6 +82,37 @@ for name, meta, expected in cases:
     got = blocking(meta)
     ok = got == expected
     print(f"[{'OK ' if ok else 'XX '}] {name}: got={got} want={expected}")
+    fails += not ok
+
+clean_cases = [
+    (
+        "a successful partial round cannot hide a retained error",
+        {
+            "head_sha": HEAD,
+            "states": {"reuse": "error", "naming": "green"},
+            "runs": [{"rubric": "naming", "verdict": "approve"}],
+        },
+        "",
+    ),
+    (
+        "durable repaired state supersedes an old error run",
+        {"head_sha": HEAD, "states": {"reuse": "green"}, "runs": [{"verdict": "error"}]},
+        HEAD,
+    ),
+    (
+        "an intentional blocking halt is reviewed, not an error retry",
+        {"head_sha": HEAD, "states": {"correctness": "blocking_block", "reuse": "absent"}},
+        HEAD,
+    ),
+    ("absent-only skeleton is not reviewed", {"head_sha": HEAD, "states": {"reuse": "absent"}}, ""),
+    ("legacy successful run still works", {"head_sha": HEAD, "runs": [{"verdict": "approve"}]}, HEAD),
+    ("legacy error still needs review", {"head_sha": HEAD, "runs": [{"verdict": "error"}]}, ""),
+    ("empty metadata is not reviewed", {}, ""),
+]
+for name, metadata, expected in clean_cases:
+    got = tc.ReviewState.ledger_clean_head(FakeRS(metadata), 1)
+    ok = got == expected
+    print(f"[{'OK ' if ok else 'XX '}] {name}: got={got!r} want={expected!r}")
     fails += not ok
 
 print(f"\n{'PASS' if not fails else 'FAIL'}: {fails} mismatch(es)")

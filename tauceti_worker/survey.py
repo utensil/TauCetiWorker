@@ -480,7 +480,7 @@ def fix_disposition(
                      whether to wait for reviews, re-push, or stop
       'skip'       — nothing worth a status line (a red PR awaiting CI, not review)
 
-    `blocking` is rs.ledger_blocking(pr, head) — the same authority CI's close reads — passed in so this
+    `blocking` is rs.ledger_blocking(pr, head) — actionable author findings, not merge readiness — passed in so this
     stays a pure formatter with no second copy of the blocking rule. A pure function (no I/O): the survey
     fetches the meta + predicate, this decides the disposition and phrases the reason.
     """
@@ -497,9 +497,13 @@ def fix_disposition(
             return ("waiting", f"reviewed at {lh[:12]}; head moved to {head[:12]} — awaiting re-review")
         return ("waiting", "build-green, awaiting first review (no scoreboard at this head yet)")
     if not blocking:
-        # head matches the scoreboard. With verdicts present this is a genuine all-green; with none at all
-        # (a malformed/skeleton scoreboard) ledger_blocking is also false, but "all green" would mislead.
-        if (meta.data.get("states") or {}) or (meta.data.get("runs") or []):
+        states = meta.data.get("states") or {}
+        runs = meta.data.get("runs") or []
+        if (states and any(state not in ("green", "stale") for state in states.values())) or (
+            not states and any(run.get("verdict") != "approve" for run in runs)
+        ):
+            return ("waiting", "review incomplete — awaiting reviewer results, not a source fix")
+        if states or runs:
             return ("waiting", "reviews all green — nothing to fix")
         return ("waiting", "review recorded at this head but no rubric verdicts yet — awaiting review")
     if pending_contest:
