@@ -26,6 +26,7 @@ RUN_STDLIB=(
   agent_transcript.py
   auto_stage_priority.py
   authoring_profiles.py
+  bounded_native_round.py
   bubble_cache.py
   bubble_version.py
   branch_claim_repo.py
