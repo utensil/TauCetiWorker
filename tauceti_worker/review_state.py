@@ -136,18 +136,18 @@ class ReviewState:
 
     # --- predicates over the meta (the cascade's clean-head / blocking rules) ---
     def ledger_clean_head(self, pr: int) -> str:
-        """Return the reviewed head only when durable state has no execution errors.
+        """Return the reviewed head when rubrics are green or awaiting an author fix.
 
         An intentional blocker may defer other rubrics; it needs an author fix, not an
-        automatic retry. A partial successful run must not hide another rubric's error.
+        automatic retry. Without a blocker, absent/stale slots still need review after
+        a budget stop. A partial successful run must not hide another rubric's error.
         """
         metadata = self.gh_meta(pr).data
         states = metadata.get("states") or {}
         if states:
-            completed = {"green", "stale", "blocking_request", "blocking_block"}
-            if all(state in completed | {"absent"} for state in states.values()) and any(
-                state in completed for state in states.values()
-            ):
+            blockers = {"blocking_request", "blocking_block"}
+            values = set(states.values())
+            if values == {"green"} or (values <= blockers | {"green", "stale", "absent"} and values & blockers):
                 return str(metadata.get("head_sha") or "")
             return ""
         runs = metadata.get("runs") or []
