@@ -504,6 +504,8 @@ def continuation_checkout(
         if local_main.returncode == 0:
             if git("merge-base", "--is-ancestor", "refs/heads/main", "origin/main").returncode:
                 return None
+        if saved_payload and (not saved_head or target_head != saved_head):
+            return None
         if not target_head:
             return False
         based = git("merge-base", "--is-ancestor", public_head, target_head)

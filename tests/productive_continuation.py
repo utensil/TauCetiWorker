@@ -8,6 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -266,12 +267,54 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
             check(f"non-object recovery {raw} launches no agent", len(calls), before_calls)
             check(f"non-object recovery {raw} remains intact", meta_path.read_text(), raw)
 
+        # Public P -> saved S -> newer N: a pending stash for S must not rewind N.
+        (checkout / "saved.txt").write_text("saved candidate\n")
+        git(checkout, "add", "saved.txt")
+        git(checkout, "commit", "-qm", "saved candidate S")
+        saved_head = git(checkout, "rev-parse", "HEAD", capture=True).stdout.strip()
+
         # The pre-existing checkpoint format still restores once, including its saved index.
         with (checkout / "tracked.txt").open("a") as f:
             f.write("legacy staged\n")
         git(checkout, "add", "tracked.txt")
         wu._checkpoint_resume(worker, candidate, "fix")
         check("legacy checkpoint has a saved payload", bool(json.loads(meta_path.read_text())["stash_ref"]), True)
+        pending = meta_path.read_bytes()
+        stash_ref = json.loads(pending)["stash_ref"]
+        stash_oid = git(checkout, "rev-parse", stash_ref, capture=True).stdout.strip()
+        (checkout / "newer.txt").write_text("newer candidate\n")
+        git(checkout, "add", "newer.txt")
+        git(checkout, "commit", "-qm", "newer candidate N")
+        newer_head = git(checkout, "rev-parse", "HEAD", capture=True).stdout.strip()
+        with (
+            patch.object(wu, "prepare_checkout") as prepare,
+            patch.object(wu, "_restore_resume") as restore,
+            patch.object(wu, "run_agent_host") as launch,
+        ):
+            result = wu._do_fixlike(worker, survey, candidate, opts, False, prompt_file="fix.md", label="fix")
+            check("pending stash with newer target defers", result, 1)
+            check("pending stash with newer target never prepares", prepare.called, False)
+            check("pending stash with newer target never restores", restore.called, False)
+            check("pending stash with newer target never launches", launch.called, False)
+        check(
+            "newer target remains referenced",
+            git(checkout, "rev-parse", "topic", capture=True).stdout.strip(),
+            newer_head,
+        )
+        check("pending stash metadata retained", meta_path.read_bytes(), pending)
+        check(
+            "pending stash ref retained", git(checkout, "rev-parse", stash_ref, capture=True).stdout.strip(), stash_oid
+        )
+        check("newer target remains clean", git(checkout, "status", "--porcelain", capture=True).stdout, "")
+
+        # Restore the exact saved tip in this temporary fixture to retain the checked positive path.
+        git(checkout, "branch", "retained-newer", newer_head)
+        git(checkout, "reset", "--hard", saved_head)
+        check(
+            "exact saved tip still permits checked restoration",
+            agents.continuation_checkout(cfg, "topic", public, saved_head=saved_head, saved_payload=True),
+            False,
+        )
         check("legacy restore preparation succeeds", agents.prepare_checkout(cfg), True)
         check("legacy saved candidate restores", wu._restore_resume(worker, candidate, pr), True)
         check(
