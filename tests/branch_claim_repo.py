@@ -4,7 +4,7 @@
 `branch/<pr>` is keyed on the canonical PR number, so every worker contending for that PR must write
 to the SAME place for the claim to mean anything; a claim in the head repository is one only its owner
 can push. The push arbiter is unaffected and still targets the head repo (that CAS, not the claim, is
-the hard guard). The claim remains cooperative and fail-open. These tests stub only process execution
+the hard guard). Claim uncertainty pauses authoring. These tests stub only process execution
 and the namespace resolver, so they can pin repository selection without touching GitHub.
 """
 
@@ -161,18 +161,21 @@ def skipped_candidate_does_not_leak():
         assert h.released_from == [CLAIMS]
 
 
-def acquire_error_fails_open():
+def acquire_error_stops_authoring():
     with Harness([2]) as h:
-        assert h.claims.begin_branch_work(143, "abc", "feature", "alice", "TauCeti")
+        try:
+            h.claims.begin_branch_work(143, "abc", "feature", "alice", "TauCeti")
+        except round_mod.NoProgress as exc:
+            assert "could not be verified" in str(exc)
+        else:
+            raise AssertionError("claim acquisition error admitted authoring")
         assert h.acquired_from == [CLAIMS]
         assert h.heartbeats == []
         assert h.claims.held is None
-        # No claim key means git-safe-push has no lease to fail closed on: an unreachable claim
-        # namespace must not be able to block a finished round from pushing.
         assert "TAUCETI_CLAIM_KEY" not in os.environ
         assert "TAUCETI_CLAIM_REPO" not in os.environ
         assert "CLAIM_REPO" not in os.environ
-        assert os.environ["TAUCETI_PUSH_EXPECT"] == "abc"
+        assert "TAUCETI_PUSH_EXPECT" not in os.environ
 
 
 def heartbeat_child_uses_selected_repo():
@@ -236,7 +239,7 @@ fails = sum(
         ("the PR head repository never becomes the claim repository", head_repository_is_never_the_claim_repository),
         ("explicit CLAIM_REPO remains authoritative", explicit_override),
         ("a skipped candidate cannot leak into the next candidate", skipped_candidate_does_not_leak),
-        ("claim errors still proceed unclaimed under branch CAS", acquire_error_fails_open),
+        ("claim acquisition errors stop before authoring", acquire_error_stops_authoring),
         ("heartbeat child inherits the selected repository", heartbeat_child_uses_selected_repo),
         ("git-safe-push scopes its lease check to the selected repository", safe_push_scopes_claim_repo),
     )

@@ -40,10 +40,12 @@ claim() {
 [[ -n "$REF" ]] || die "no destination branch (set TAUCETI_PUSH_REF or pass it as an argument)"
 
 # 1) Lease check (fail closed if we no longer hold the claim someone may have taken over).
-if [[ -n "$CLAIM_KEY" && -x "$CLAIM_SH" ]]; then
-    if ! claim holds "$CLAIM_KEY"; then
-        claim renew "$CLAIM_KEY" >/dev/null 2>&1 \
-            || die "lease '$CLAIM_KEY' lost (another agent took over) — refusing to push"
+if [[ -n "$CLAIM_KEY" ]]; then
+    [[ -x "$CLAIM_SH" ]] || die "claim ownership could not be verified: helper unavailable; refusing to push"; claim holds "$CLAIM_KEY" >/dev/null 2>&1; holds_rc=$?
+    if [[ "$holds_rc" -ne 0 ]]; then
+        claim renew "$CLAIM_KEY" >/dev/null 2>&1; renew_rc=$?
+        [[ "$renew_rc" -eq 0 ]] || die \
+            "claim ownership could not be verified (holds rc=$holds_rc, renew rc=$renew_rc) — refusing to push"
     fi
 fi
 
