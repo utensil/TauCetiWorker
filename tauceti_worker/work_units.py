@@ -9,6 +9,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -826,6 +827,113 @@ def _active_resume_path(w: Worker) -> Path:
     return w.cfg.state / "resume" / "active-checkout.json"
 
 
+def _counter_debit_path(w: Worker) -> Path:
+    return w.cfg.state / "resume" / "counter-debit.json"
+
+
+def _require_counter_reconciled(w: Worker) -> None:
+    try:
+        _counter_debit_path(w).lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise NoProgress("counter debit status unreadable; admission and preparation blocked") from exc
+    raise NoProgress("counter debit needs reconciliation; admission and preparation blocked")
+
+
+def _counter_bytes(path: Path, limit: int = 128) -> bytes | None:
+    """Strict, bounded counter observation; absence is distinct from corrupt/unreadable state."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise OSError("counter state is not a bounded regular file")
+        data = source.read(limit + 1)
+        if len(data) > limit:
+            raise OSError("counter state grew beyond its bound")
+        return data
+
+
+def _charge_maintenance_attempt(w: Worker, c: Candidate, label: str, charged: tuple[str, ...]) -> None:
+    """Debit under the worker's single-writer lock; a definite prelaunch failure restores exact state.
+
+    A bounded, exclusive intent survives interrupted or unverifiable rollback. It is an operator
+    reconciliation gate, never an automatically replayed debit or a substitute for author recovery.
+    """
+    if not charged:
+        return
+    _require_counter_reconciled(w)
+    snapshots = {key: _counter_bytes(w.cfg.state / key) for key in charged}
+    values = {}
+    for key, raw in snapshots.items():
+        value = raw.decode("ascii").strip() if raw is not None else "0"
+        if not re.fullmatch(r"[0-9]+", value):
+            raise OSError("counter state is not a nonnegative integer")
+        values[key] = int(value) + 1
+    intent = _counter_debit_path(w)
+    payload = json.dumps(
+        {
+            "pr": c.pr,
+            "public_head": c.head,
+            "stage": label,
+            "previous": {key: raw.decode("ascii") if raw is not None else None for key, raw in snapshots.items()},
+        },
+        sort_keys=True,
+    ).encode("ascii")
+    intent.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(intent, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as dest:
+        dest.write(payload)
+        dest.flush()
+        os.fsync(dest.fileno())
+    directory = os.open(intent.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+    def clear_intent() -> None:
+        if _counter_bytes(intent, 4096) != payload:
+            raise NoProgress("counter debit intent changed; reconciliation required")
+        intent.unlink()
+
+    attempted = []
+    try:
+        for key, value in values.items():
+            if _counter_bytes(w.cfg.state / key) != snapshots[key]:
+                raise NoProgress("counter changed before debit; reconciliation required")
+            attempted.append(key)  # a write may fail after changing the file
+            w.counters.write(key, value)
+        if any(_counter_bytes(w.cfg.state / key) != str(value).encode("ascii") for key, value in values.items()):
+            raise NoProgress("counter debit could not be verified")
+        clear_intent()
+    except BaseException as exc:
+        for key in reversed(attempted):
+            path, previous = w.cfg.state / key, snapshots[key]
+            try:
+                current = _counter_bytes(path)
+                if current == previous:
+                    continue
+                if current != str(values[key]).encode("ascii"):
+                    continue  # never overwrite an unexpected third value, even during rollback
+                if previous is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(previous)
+            except OSError:
+                pass  # verify every snapshot below, retaining the intent if any remain uncertain
+        try:
+            if any(_counter_bytes(w.cfg.state / key) != raw for key, raw in snapshots.items()):
+                raise NoProgress("counter rollback did not restore its exact snapshots")
+            clear_intent()
+        except (OSError, NoProgress) as rollback:
+            raise NoProgress("counter rollback unverified; admission and preparation blocked") from rollback
+        raise exc
+
+
 def _capture_intent_path(w: Worker) -> Path:
     return w.cfg.state / "resume" / "capture-intent.json"
 
@@ -929,6 +1037,7 @@ def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
 
 def _recover_active_checkout(w: Worker) -> None:
     """Finish preservation of the previous PR after a killed/timed-out round, before any switch."""
+    _require_counter_reconciled(w)
     path = _active_resume_path(w)
     if not path.exists():
         if _capture_intent_path(w).exists():
@@ -961,6 +1070,7 @@ def _recover_active_checkout(w: Worker) -> None:
 
 def _restore_resume(w: Worker, c: Candidate, p) -> bool:
     """Restore an exact-head checkpoint; failures stop before any destructive fallback checkout."""
+    _require_counter_reconciled(w)
     if _capture_intent_path(w).exists():
         raise NoProgress("candidate capture transaction pending; restore and preparation blocked")
     meta_path, commit_ref, _ = _resume_paths(w, c)
@@ -1083,6 +1193,7 @@ def _do_fixlike(
     if not (p.head_owner and p.head_repo and p.head_ref):
         log(f"  {label} #{pr}: head repo deleted/unavailable — skipping")
         return None
+    _require_counter_reconciled(w)
     if not w.claims.begin_branch_work(pr, head, p.head_ref, p.head_owner, p.head_repo):
         return None  # claimed elsewhere → caller tries the next candidate
     attempt_charged = False
@@ -1090,8 +1201,7 @@ def _do_fixlike(
     def charge_attempt() -> None:
         nonlocal attempt_charged
         if not attempt_charged:
-            for key in charged:
-                w.counters.incr(key)
+            _charge_maintenance_attempt(w, c, label, charged)
             attempt_charged = True
 
     prompt = fill_prompt(HERE / "prompts" / prompt_file, PR=pr, AGENT=opts.agent_name, BIN=wrapper_bin(bubble))
@@ -1144,6 +1254,7 @@ def _do_fixlike(
                 os.environ.pop("TAUCETI_ACTIVE_CHECKOUT", None)
             else:
                 os.environ["TAUCETI_ACTIVE_CHECKOUT"] = prior_active
+            _require_counter_reconciled(w)
             if not agent_quiescent():
                 raise NoProgress("author is not quiescent; capture and checkout preparation blocked")
             _checkpoint_resume(w, c, label)

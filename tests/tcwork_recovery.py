@@ -410,6 +410,166 @@ class RecoveryTests(unittest.TestCase):
                             run(self.worker, self.sv, self.c, self.opts, False)
                     self.assertEqual([self.worker.counters.read(key) for key in keys], [int(worked)] * len(keys))
 
+    def run_counter_ci(self, bubble=False):
+        with (
+            patch.object(w, "prepare_checkout", return_value=True),
+            patch.object(w, "_restore_resume", return_value=True),
+            patch.object(w, "_effective_authoring_profile", return_value=NS(provider="codex")),
+            patch.object(a, "_authoring_profile", side_effect=lambda profile: profile),
+            patch.object(
+                a, "host_agent_argv", side_effect=lambda *_: ([sys.executable, "-c", "pass"], dict(os.environ))
+            ),
+        ):
+            a._AGENT_QUIESCENT = True
+            return w.do_fix_ci(self.worker, self.sv, self.c, self.opts, bubble)
+
+    def test_second_counter_directory_never_partially_charges(self):
+        head_key, pr_key = self.maintenance_cases()[1][1]
+        (self.cfg.state / pr_key).mkdir(parents=True)
+        with patch.object(a.subprocess, "Popen", wraps=subprocess.Popen) as spawn:
+            for _ in range(3):
+                with self.assertRaises(OSError):
+                    self.run_counter_ci()
+        self.assertFalse(any(call.args[0][:2] == [sys.executable, "-c"] for call in spawn.call_args_list))
+        self.assertFalse((self.cfg.state / head_key).exists())
+        self.assertTrue((self.cfg.state / pr_key).is_dir())
+        self.assertFalse(w._counter_debit_path(self.worker).exists())
+
+    def test_second_counter_write_failure_restores_exact_values_or_absence(self):
+        keys = self.maintenance_cases()[1][1]
+        write = self.worker.counters.write
+        for previous in (None, b" 002\n"):
+            for wrote_second in (False, True):
+                for key in keys:
+                    path = self.cfg.state / key
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if previous is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(previous)
+
+                def fail_second(name, value, wrote_second=wrote_second):
+                    if name == keys[1]:
+                        if wrote_second:
+                            write(name, value)
+                        raise OSError("second counter write failed")
+                    write(name, value)
+
+                with (
+                    self.subTest(previous=previous, wrote_second=wrote_second),
+                    patch.object(self.worker.counters, "write", side_effect=fail_second),
+                    patch.object(a.subprocess, "Popen", wraps=subprocess.Popen) as spawn,
+                ):
+                    for _ in range(3):
+                        with self.assertRaises(OSError):
+                            self.run_counter_ci()
+                        self.assertEqual([w._counter_bytes(self.cfg.state / key) for key in keys], [previous] * 2)
+                        self.assertFalse(w._counter_debit_path(self.worker).exists())
+                    self.assertFalse(any(call.args[0][:2] == [sys.executable, "-c"] for call in spawn.call_args_list))
+
+    def test_unverified_counter_rollback_preserves_gates_and_blocks_retry(self):
+        keys = self.maintenance_cases()[1][1]
+        for key in keys:
+            self.worker.counters.write(key, 2)
+        write, write_bytes = self.worker.counters.write, Path.write_bytes
+
+        def fail_second(name, value):
+            if name == keys[1]:
+                raise OSError("second counter write failed")
+            write(name, value)
+
+        def fail_rollback(path, data):
+            if path == self.cfg.state / keys[0]:
+                raise OSError("rollback storage failure")
+            return write_bytes(path, data)
+
+        with (
+            patch.object(self.worker.counters, "write", side_effect=fail_second),
+            patch.object(Path, "write_bytes", fail_rollback),
+            self.assertRaises(NoProgress),
+        ):
+            self.run_counter_ci()
+        self.assertEqual([self.worker.counters.read(key) for key in keys], [3, 2])
+        self.assertTrue(w._active_resume_path(self.worker).exists())
+        intent = w._counter_debit_path(self.worker)
+        prior = intent.read_bytes()
+        self.assertEqual(json.loads(prior)["previous"], {key: "2" for key in keys})
+        for bubble in (False, True):
+            with (
+                self.subTest(bubble=bubble),
+                patch.object(self.worker.claims, "begin_branch_work") as claim,
+                patch.object(w, "prepare_checkout") as prepare,
+                patch.object(w, "run_in_bubble") as author,
+                self.assertRaises(NoProgress),
+            ):
+                w.do_fix_ci(self.worker, self.sv, self.c, self.opts, bubble)
+            claim.assert_not_called()
+            prepare.assert_not_called()
+            author.assert_not_called()
+        with self.assertRaises(NoProgress):
+            w._recover_active_checkout(self.worker)
+        with self.assertRaises(NoProgress):
+            w._restore_resume(self.worker, self.c, self.pr)
+        with patch.object(a, "sync_mathlib_pool") as sync:
+            self.assertFalse(a.prepare_checkout(self.cfg))
+            sync.assert_not_called()
+        self.assertEqual(intent.read_bytes(), prior)
+
+    def test_counter_rollback_never_overwrites_an_unexpected_value(self):
+        keys = self.maintenance_cases()[1][1]
+        for key in keys:
+            self.worker.counters.write(key, 2)
+        write = self.worker.counters.write
+
+        def changed_counter(name, value):
+            if name == keys[1]:
+                (self.cfg.state / keys[0]).write_bytes(b"99")
+                raise OSError("second write failed after an unexpected change")
+            write(name, value)
+
+        with patch.object(self.worker.counters, "write", side_effect=changed_counter), self.assertRaises(NoProgress):
+            self.run_counter_ci()
+        self.assertEqual((self.cfg.state / keys[0]).read_bytes(), b"99")
+        self.assertTrue(w._counter_debit_path(self.worker).exists())
+        self.assertTrue(w._active_resume_path(self.worker).exists())
+
+    def test_invalid_counter_values_are_rejected_before_either_write(self):
+        keys = self.maintenance_cases()[1][1]
+        for invalid in (b"", b"-1", b"not a counter", b"1" * 129):
+            path = self.cfg.state / keys[1]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(invalid)
+            with self.subTest(invalid=invalid), patch.object(self.worker.counters, "write") as write:
+                with self.assertRaises(OSError):
+                    self.run_counter_ci()
+                write.assert_not_called()
+                self.assertFalse((self.cfg.state / keys[0]).exists())
+                self.assertEqual(path.read_bytes(), invalid)
+
+    def test_malformed_counter_intent_blocks_host_and_bubble_admission(self):
+        intent = w._counter_debit_path(self.worker)
+        intent.parent.mkdir(parents=True)
+        for kind in ("malformed", "directory", "symlink"):
+            if kind == "malformed":
+                intent.write_bytes(b"not json")
+            elif kind == "directory":
+                intent.mkdir()
+            else:
+                intent.symlink_to(intent.parent / "missing")
+            for bubble in (False, True):
+                with (
+                    self.subTest(kind=kind, bubble=bubble),
+                    patch.object(self.worker.claims, "begin_branch_work") as claim,
+                    self.assertRaises(NoProgress),
+                ):
+                    w.do_fix_ci(self.worker, self.sv, self.c, self.opts, bubble)
+                claim.assert_not_called()
+                self.assertFalse(a._checkout_preserved(self.cfg))
+            if kind == "directory":
+                intent.rmdir()
+            else:
+                intent.unlink()
+
     def test_unattributed_unpublished_commit_blocks_prepare(self):
         self.candidate()
         with patch.object(a, "sync_mathlib_pool") as sync:

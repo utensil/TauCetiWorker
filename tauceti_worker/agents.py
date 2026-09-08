@@ -473,6 +473,18 @@ def sync_mathlib_pool(cfg: Config) -> None:
 
 def _checkout_preserved(cfg: Config) -> bool:
     """Never clean dirty files or detach the only reachable unpublished commit."""
+    state = getattr(cfg, "state", None)
+    if state:
+        try:
+            (state / "resume" / "counter-debit.json").lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log("checkout: counter debit status unreadable; preparation blocked")
+            return False
+        else:
+            log("checkout: counter debit needs reconciliation; preparation blocked")
+            return False
     co = cfg.checkout
     if not (co / ".git").exists():
         return True
