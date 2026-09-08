@@ -11,10 +11,12 @@ import subprocess
 import sys
 import time
 
-from .config import Config, Die, log
+from .config import Config, Die, NoProgress, log
 from .constants import CLAIM_HEARTBEAT_S, CLAIM_TTL_S, ROUND_TIMEOUT
 from .github import claims_repo
 from .paths import CLAIM_SH, self_argv, self_env
+
+CLAIM_CALL_TIMEOUT_S = 40
 
 # ============================================================================
 # Round lifecycle — flock (one round per worker), signal handling, cleanup, and
@@ -188,7 +190,7 @@ class Claims:
 
     def begin_branch_work(self, pr: int, head: str, refname: str, owner: str, repo: str) -> bool:
         """Take the branch claim and set the push-arbiter env. Returns False if claimed elsewhere
-        (caller skips this PR — dedup). A claim error is non-fatal: proceed unclaimed (CAS still protects).
+        (caller skips this PR — dedup). An acquisition error pauses the round before authoring.
 
         The claim goes to the worker's claim namespace, NOT to the PR's head repository: `branch/<pr>`
         is keyed on the canonical PR number, so two workers contend for it wherever they are, whereas a
@@ -197,29 +199,30 @@ class Claims:
         key = f"branch/{pr}"
         claim_repo = claims_repo()
         claim_env = {**os.environ, "CLAIM_REPO": claim_repo}
-        rc = subprocess.run([CLAIM_SH, "acquire", key, str(CLAIM_TTL_S)], capture_output=True, env=claim_env).returncode
+        try:
+            rc = subprocess.run(
+                [CLAIM_SH, "acquire", key, str(CLAIM_TTL_S)],
+                capture_output=True,
+                env=claim_env,
+                timeout=CLAIM_CALL_TIMEOUT_S,
+            ).returncode
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise NoProgress(f"claim ownership could not be verified for branch #{pr}; no authoring launched") from e
         if rc == 1:
             log(f"branch #{pr} claimed by another worker — skipping (COOP dedup)")
             return False
+        if rc != 0:
+            raise NoProgress(f"claim ownership could not be verified for branch #{pr}; no authoring launched")
         os.environ["TAUCETI_PUSH_REF"] = refname
         os.environ["TAUCETI_PUSH_EXPECT"] = head
         os.environ["TAUCETI_PUSH_REMOTE"] = f"https://github.com/{owner}/{repo}"
         os.environ["TAUCETI_CLAIM_SH"] = CLAIM_SH
-        if rc == 0:
-            self.held = (key, claim_repo)
-            # Keep this scoped to the push arbiter: unrelated agent-invoked claims remain canonical.
-            os.environ["TAUCETI_CLAIM_REPO"] = claim_repo
-            os.environ["TAUCETI_CLAIM_KEY"] = key
-            self.ctx.add_cleanup(self.release)
-            self.start_heartbeat(key, claim_repo)
-        else:
-            log(
-                f"claim acquire #{pr} errored (rc={rc}) against {claim_repo} — proceeding unclaimed "
-                f"(branch CAS still protects). If this repeats, this account cannot push there; set "
-                f"CLAIM_REPO=<a repo your whole fleet can push to> to pick the namespace yourself."
-            )
-            os.environ.pop("TAUCETI_CLAIM_KEY", None)
-            os.environ.pop("TAUCETI_CLAIM_REPO", None)
+        self.held = (key, claim_repo)
+        # Keep this scoped to the push arbiter: unrelated agent-invoked claims remain canonical.
+        os.environ["TAUCETI_CLAIM_REPO"] = claim_repo
+        os.environ["TAUCETI_CLAIM_KEY"] = key
+        self.ctx.add_cleanup(self.release)
+        self.start_heartbeat(key, claim_repo)
         return True
 
     def start_heartbeat(self, key: str, claim_repo: str) -> None:
@@ -257,9 +260,17 @@ class Claims:
     def release(self) -> None:
         if self.held:
             key, claim_repo = self.held
-            subprocess.run(
-                [CLAIM_SH, "release", key], capture_output=True, env={**os.environ, "CLAIM_REPO": claim_repo}
-            )
+            try:
+                rc = subprocess.run(
+                    [CLAIM_SH, "release", key],
+                    capture_output=True,
+                    env={**os.environ, "CLAIM_REPO": claim_repo},
+                    timeout=CLAIM_CALL_TIMEOUT_S,
+                ).returncode
+                if rc != 0:
+                    log(f"claim release for {key}: ownership could not be verified (rc={rc})")
+            except (OSError, subprocess.TimeoutExpired):
+                log(f"claim release for {key}: ownership could not be verified")
             self.held = None
             os.environ.pop("TAUCETI_CLAIM_KEY", None)
             os.environ.pop("TAUCETI_CLAIM_REPO", None)
@@ -272,6 +283,7 @@ def cmd_heartbeat(args) -> int:
 
     key = args.key
     ppipe = args.ppipe
+    parent_pid = os.getppid() if ppipe is not None else None
     while True:
         if ppipe is not None:
             r, _, _ = select.select([ppipe], [], [], CLAIM_HEARTBEAT_S)
@@ -283,8 +295,22 @@ def cmd_heartbeat(args) -> int:
                     return 0
         else:
             time.sleep(CLAIM_HEARTBEAT_S)
-        if subprocess.run([CLAIM_SH, "renew", key], capture_output=True).returncode != 0:
-            return 0  # lease lost → stop renewing so it can expire
+        try:
+            rc = subprocess.run([CLAIM_SH, "renew", key], capture_output=True, timeout=CLAIM_CALL_TIMEOUT_S).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            rc = 2
+        if rc != 0:
+            action = "stopping native round" if parent_pid is not None else "stopping heartbeat"
+            log(f"claim heartbeat for {key}: ownership could not be verified (rc={rc}); {action}")
+            if parent_pid is not None:
+                if select.select([ppipe], [], [], 0)[0]:  # parent closed its pipe (or violated the EOF-only seam)
+                    return 0
+                if os.getppid() == parent_pid:
+                    try:
+                        os.kill(parent_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+            return 0
 
 
 def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> int:
