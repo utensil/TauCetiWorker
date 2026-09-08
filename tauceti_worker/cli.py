@@ -174,13 +174,31 @@ def add_review_scope_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
-def add_work_flags(p: argparse.ArgumentParser) -> None:
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def add_work_flags(p: argparse.ArgumentParser, *, native_loop: bool = False) -> None:
     p.add_argument(
         "--loop",
         action="store_true",
         help="run the driver: keep doing rounds (pacing against quota between them) "
         "instead of the default single round",
     )
+    if native_loop:
+        p.add_argument(
+            "--max-rounds",
+            type=_positive_int,
+            default=None,
+            metavar="N",
+            help="stop the native loop after dispatching N rounds (positive integer; requires --loop)",
+        )
     add_review_scope_flags(p)
     p.add_argument(
         "--only",
@@ -537,7 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Progress-report rounds always run on the host.",
         epilog=WORK_EPILOG,
     )
-    add_work_flags(w)
+    add_work_flags(w, native_loop=True)
 
     s = sub.add_parser("status", help="read-only survey of available work + quota")
     s.add_argument("--json", action="store_true", help="emit the survey as JSON")
@@ -625,6 +643,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     cmd = args.cmd
+
+    if getattr(args, "max_rounds", None) is not None and not getattr(args, "loop", False):
+        parser.error("--max-rounds requires 'work --loop'")
 
     resolve_pace(cmd, args)
 
