@@ -164,6 +164,12 @@ exists only in process arguments.
 
 ### Keeping this scoped-review fork current
 
+Review execution errors and deferred rubric slots are not author findings: they do not dispatch
+`fix` by themselves. A genuine `request_changes` or `block` still does, including when another
+rubric errored. Review retry eligibility consults durable rubric state, so a successful partial
+round cannot hide a retained error. An intentional early blocking halt is not a failed execution.
+These scheduling rules do not relax the separate all-green merge gate.
+
 Scoped-review production lives on `dev`. Before a new review round, run `scripts/sync-upstream --push`
 from a clean `dev` checkout. It fetches `kim-em/TauCetiWorker:main`, merges that upstream head into
 `dev`, runs the fork's lint and test gates, and pushes the verified production commit. It does not update

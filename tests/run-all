@@ -71,6 +71,7 @@ RUN_STDLIB=(
   review_codex_model.py
   review_daily_cap.py
   review_diagnostics.py
+  review_incomplete.py
   review_provider_down.py
   review_scope.py
   review_throttles.py
