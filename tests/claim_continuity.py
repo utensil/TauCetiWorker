@@ -104,6 +104,20 @@ def local_claim_states():
             assert call_claim(a, command, "branch/bad").returncode == 2, command
 
 
+def rejecting_remote_is_unknown():
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        remote = tmp / "remote.git"
+        subprocess.run([REAL_GIT, "init", "-q", "--bare", remote], check=True)
+        hook = remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'provider policy rejected the claim' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        result = call_claim(claim_env(remote, tmp / "claims.git"), "acquire", "branch/rejected", "30")
+        assert result.returncode == 2, (result.returncode, result.stderr)
+        refs = subprocess.check_output([REAL_GIT, "-C", remote, "for-each-ref", "refs/tauceti-claims"], text=True)
+        assert not refs, "rejecting provider unexpectedly published a claim"
+
+
 def lookup_timeout_is_unknown():
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -280,6 +294,7 @@ fails = sum(
     check(name, case)
     for name, case in (
         ("local acquire/read/holds/renew/release and unknown states", local_claim_states),
+        ("rejecting claim provider is unknown, not contention", rejecting_remote_is_unknown),
         ("claim lookup timeout is bounded and unknown", lookup_timeout_is_unknown),
         ("same-owner renewal race preserves the current build", same_owner_race_continues_current_build),
         ("safe push refuses missing helpers and uncertain ownership", safe_push_refuses_uncertain_claims),

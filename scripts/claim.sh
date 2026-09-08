@@ -93,12 +93,17 @@ payload() {
           resource:$res, observed_branch_oid:($observed | if . == "" then null else . end)}'
 }
 
-# push_cas REF EXPECTED NEWOID — CAS push (EXPECTED="" ⇒ create-only). 0 win, 1 lost/rejected.
+# push_cas REF EXPECTED NEWOID — CAS push (EXPECTED="" ⇒ create-only). 0 win, 1 stale lease, 2 error.
 push_cas() {
-    local out
-    out=$(g push --force-with-lease="$1:$2" origin "$3:$1" 2>&1)
-    if [[ $? -eq 0 ]]; then return 0; fi
-    grep -qiE 'rejected|stale info|failed to push' <<<"$out" && return 1
+    local out rc
+    out=$(LC_ALL=C g push --force-with-lease="$1:$2" origin "$3:$1" 2>&1); rc=$?
+    if [[ "$rc" -eq 0 ]]; then return 0; fi
+    if [[ "$rc" -eq 1 ]]; then
+        grep -qE '^[[:space:]]*![[:space:]]+\[rejected\].* \(stale info\)$' <<<"$out" && return 1
+        # Concurrent pushes can both pass advertisement, then fail the server's expected-ref CAS.
+        [[ -n "$2" ]] && grep -F "remote: error: cannot lock ref '$1': is at " <<<"$out" |
+            grep -qE " but expected $2[[:space:]]*$" && return 1
+    fi
     echo "claim: unexpected push error on $1: $out" >&2; return 2
 }
 push_delete() { g push --force-with-lease="$1:$2" origin ":$1" >/dev/null 2>&1; }
