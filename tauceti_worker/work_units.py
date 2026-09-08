@@ -22,6 +22,7 @@ from .agents import (
     _codex_review_model_override,
     _kiro_review_model,
     _review_engine_uvx_source,
+    agent_quiescent,
     fetch_git_source,
     fetch_ref,
     fill_prompt,
@@ -70,7 +71,7 @@ from .review_diagnostics import (
     recover_review_failures,
 )
 from .review_state import ReviewState
-from .round import Claims, RoundContext
+from .round import Claims, RoundContext, check_claim_health
 from .runtime_status import report_failure, report_runtime, runtime_snapshot
 from .survey import (
     TARGET_MARKER_RE,
@@ -411,8 +412,7 @@ def _open_pr_numbers(w: Worker) -> set[int] | None:
 
 def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
     """Capture just enough GitHub state to tell, after the round, whether the agent actually changed
-    anything. Returns None if we can't snapshot — then the guard is skipped (never block a real
-    success on a flaky query)."""
+    anything. Returns None when publication cannot be verified; the guard then backs off."""
     if c.pr:
         st = w.gh.pr_progress_state(c.pr)  # head + comment count in one GraphQL call
         if st is None:
@@ -422,29 +422,32 @@ def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
     return {"prs": nums} if nums is not None else None
 
 
-def _progressed(w: Worker, c: Candidate, pre: dict | None) -> bool:
-    """True if the round left an observable mark (push / new PR / new issue-or-review comment).
-    Conservative: any query failure or ambiguity returns True, so we never falsely discard real work."""
+def _progressed(w: Worker, c: Candidate, pre: dict | None) -> bool | None:
+    """True for observable publication, None for unreadable state; comments never certify progress."""
     if pre is None:
-        return True
+        return None
     if c.pr:
         st = w.gh.pr_progress_state(c.pr)
         if st is None:
-            return True
-        return (st["head"] or "") != pre["head"] or st["ncomments"] > pre["ncomments"]
+            return None
+        if (st["head"] or "") == pre["head"]:
+            return False
+        if getattr(w.rc, "author_pr", None) == c.pr:
+            return st["head"] == w.rc.author_head
+        return True
     now = _open_pr_numbers(w)
     if now is None:
-        return True
+        return None
     new = now - pre["prs"]
     if not new:
         return False
     # A new PR appeared — but only one carrying a tauceti-target marker is THIS round's authoring work.
     # An unrelated/human PR (or, under multi-worker, another worker's concurrent PR) that shows up
-    # mid-round must not mask this round's no-op. Conservative: if we can't read a body, assume ours.
+    # mid-round must not mask this round's no-op. Unreadable bodies remain unknown.
     for num in new:
         v = w.gh.pr_view(num, ["body"])
         if v is None:
-            return True
+            return None
         if TARGET_MARKER_RE.search(v.get("body") or ""):
             return True
     return False
@@ -586,12 +589,14 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
     # A model round that exits 0 but leaves no mark on GitHub did no real work. Usually benign: another
     # worker pushed the branch first and safe-push declined rather than clobber, or the agent chose not
     # to act. Surface it as no-progress (so the loop backs off) but say so plainly and point at the log.
-    if rc == 0 and stage in PROGRESS_GUARDED and not _progressed(w, c, pre):
+    progress = _progressed(w, c, pre) if rc == 0 and stage in PROGRESS_GUARDED else True
+    if progress is None:
+        raise NoProgress(f"{stage}: publication could not be verified; retained recovery, backing off")
+    if progress is False:
         tgt = f" #{c.pr}" if c.pr else ""
         raise NoProgress(
-            f"{stage}{tgt}: the agent finished but nothing landed on GitHub (no push, new PR, or "
-            f"comment). Most often another worker pushed the branch first (safe-push declines rather "
-            f"than clobber) or the agent declined to act — not a failure. Transcript: {w.cfg.logdir}"
+            f"{stage}{tgt}: the agent finished without verified publication. "
+            f"Contests wait for re-review through the ordinary survey gate. Transcript: {w.cfg.logdir}"
         )
     return rc
 
@@ -801,129 +806,147 @@ def _resume_paths(w: Worker, c: Candidate) -> tuple[Path, str, str]:
     )
 
 
-def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
-    """Preserve a changed checkout after a provider outage so the next round can resume it.
+def _resume_git(w: Worker, *args: str, timeout: int = 30) -> str:
+    result = subprocess.run(["git", "-C", str(w.cfg.checkout), *args], capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise NoProgress(f"candidate preservation: git {args[0]} failed; checkout left for recovery")
+    return result.stdout.strip()
 
-    A provider-capacity failure is not a reason to throw away a validated local commit. The checkpoint
-    is private, keyed by the exact public head, and only restored when that head is still current. A
-    dirty tree is stashed (including untracked source files) behind a durable private ref; a committed
-    candidate is retained by its exact commit ref. Failure to checkpoint never masks the original
-    provider diagnostic.
+
+def _write_resume_meta(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _active_resume_path(w: Worker) -> Path:
+    return w.cfg.state / "resume" / "active-checkout.json"
+
+
+def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
+    """Capture every changed candidate, independently of provider refund classification.
+
+    All Git operations are checked. Failure is a hard preparation gate, never success-shaped
+    metadata. Older generations remain reachable when a resumed author changes its candidate.
     """
-    co = w.cfg.checkout
     try:
-        head = _checkout_head(w.cfg)
-        if not head:
-            return
-        status = subprocess.run(
-            ["git", "-C", str(co), "status", "--porcelain"], capture_output=True, text=True, timeout=30
-        )
-        dirty = bool((status.stdout or "").strip())
+        head = _resume_git(w, "rev-parse", "HEAD")
+        dirty = bool(_resume_git(w, "status", "--porcelain", "--untracked-files=all"))
         if head == c.head and not dirty:
             return
         meta_path, commit_ref, stash_ref = _resume_paths(w, c)
-        subprocess.run(["git", "-C", str(co), "update-ref", commit_ref, head], check=True, timeout=30)
+        if meta_path.exists():
+            old = json.loads(meta_path.read_text(encoding="utf-8"))
+            generation = str(time.time_ns())
+            for field in ("commit_ref", "stash_ref"):
+                ref = old.get(field)
+                if ref:
+                    oid = _resume_git(w, "rev-parse", str(ref))
+                    archive = f"refs/tauceti-resume-history/{c.pr}/{generation}/{field}"
+                    _resume_git(w, "update-ref", archive, oid)
+        _resume_git(w, "update-ref", commit_ref, head)
         stash = None
         if dirty:
-            made = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(co),
-                    "stash",
-                    "push",
-                    "--include-untracked",
-                    "--quiet",
-                    "-m",
-                    f"tauceti-resume {c.pr}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
+            _resume_git(
+                w, "stash", "push", "--include-untracked", "--quiet", "-m", f"tauceti-resume {c.pr}", timeout=120
             )
-            if made.returncode == 0:
-                raw = subprocess.run(
-                    ["git", "-C", str(co), "rev-parse", "refs/stash"], capture_output=True, text=True, timeout=30
-                )
-                if raw.returncode == 0 and raw.stdout.strip():
-                    stash = raw.stdout.strip()
-                    subprocess.run(["git", "-C", str(co), "update-ref", stash_ref, stash], check=True, timeout=30)
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = meta_path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "pr": c.pr,
-                    "public_head": c.head,
-                    "candidate_head": head,
-                    "commit_ref": commit_ref,
-                    "stash_ref": stash_ref if stash else None,
-                    "stage": label,
-                    "created_at": int(time.time()),
-                },
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+            stash = _resume_git(w, "rev-parse", "refs/stash")
+            _resume_git(w, "update-ref", stash_ref, stash)
+            if _resume_git(w, "status", "--porcelain", "--untracked-files=all"):
+                raise NoProgress("candidate preservation: checkout changed during stash; preparation blocked")
+        _write_resume_meta(
+            meta_path,
+            {
+                "pr": c.pr,
+                "public_head": c.head,
+                "candidate_head": head,
+                "commit_ref": commit_ref,
+                "stash_ref": stash_ref if stash else None,
+                "stage": label,
+                "created_at": int(time.time()),
+            },
         )
-        os.replace(tmp, meta_path)
-        log(f"  {label} #{c.pr}: checkpointed local candidate @{head[:12]} for provider-capacity resume")
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        log(f"  {label} #{c.pr}: could not checkpoint local candidate ({exc})")
+        log(f"  {label} #{c.pr}: preserved local candidate @{head[:12]}")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise NoProgress("candidate preservation failed; checkout must be recovered before preparation") from exc
+
+
+def _recover_active_checkout(w: Worker) -> None:
+    """Finish preservation of the previous PR after a killed/timed-out round, before any switch."""
+    path = _active_resume_path(w)
+    if not path.exists():
+        return
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        pgid = meta.get("author_pgid")
+        if pgid:
+            try:
+                os.killpg(int(pgid), 0)
+            except ProcessLookupError:
+                pass
+            except PermissionError as exc:
+                raise NoProgress("prior author process group is not verifiably stopped") from exc
+            else:
+                raise NoProgress("prior author process group still exists; capture and preparation blocked")
+        previous = Candidate(int(meta["pr"]), str(meta["public_head"]), "interrupted author")
+        _checkpoint_resume(w, previous, str(meta["stage"]))
+        path.unlink()
+    except (OSError, ValueError, KeyError) as exc:
+        raise NoProgress("active candidate metadata unreadable; checkout preparation blocked") from exc
 
 
 def _restore_resume(w: Worker, c: Candidate, p) -> bool:
-    """Restore a private exact-head checkpoint after prepare_checkout reset the worker checkout."""
-    meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+    """Restore an exact-head checkpoint; failures stop before any destructive fallback checkout."""
+    meta_path, commit_ref, _ = _resume_paths(w, c)
+    if not meta_path.is_file():
+        # A remote move does not authorize replacing a pending candidate from an older head.
+        if any((w.cfg.state / "resume").glob(f"{c.pr}-*.json")):
+            raise NoProgress(f"resume #{c.pr}: public head moved; preserved candidate needs reconciliation")
+        return False
     try:
-        if not meta_path.is_file():
-            return False
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         if meta.get("public_head") != c.head or meta.get("pr") != c.pr:
-            return False
+            raise NoProgress(f"resume #{c.pr}: checkpoint identity mismatch")
         candidate_ref = str(meta.get("commit_ref") or commit_ref)
-        candidate_head = str(meta.get("candidate_head") or "")
-        verify = subprocess.run(
-            ["git", "-C", str(w.cfg.checkout), "merge-base", "--is-ancestor", c.head, candidate_ref],
-            timeout=30,
-        )
-        if verify.returncode != 0 or not candidate_head:
-            log(f"  resume #{c.pr}: checkpoint is not based on current public head; leaving it preserved")
-            return False
-        branch = p.head_ref
-        if subprocess.run(
-            ["git", "-C", str(w.cfg.checkout), "checkout", "-q", "-B", branch, candidate_ref], timeout=60
-        ).returncode:
-            return False
-        stash = meta.get("stash_ref")
-        if stash:
-            applied = subprocess.run(
-                ["git", "-C", str(w.cfg.checkout), "stash", "apply", "--index", str(stash)],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if applied.returncode:
-                log(f"  resume #{c.pr}: checkpoint stash did not apply; candidate remains in {candidate_ref}")
-                subprocess.run(["git", "-C", str(w.cfg.checkout), "reset", "-q", "--hard", "origin/main"], timeout=60)
-                return False
+        candidate_head = _resume_git(w, "rev-parse", candidate_ref)
+        if candidate_head != meta.get("candidate_head"):
+            raise NoProgress(f"resume #{c.pr}: checkpoint ref changed; leaving it preserved")
+        _resume_git(w, "merge-base", "--is-ancestor", c.head, candidate_ref)
+        _resume_git(w, "checkout", "-q", "-B", p.head_ref, candidate_ref, timeout=60)
+        if meta.get("stash_ref"):
+            _resume_git(w, "stash", "apply", "--index", str(meta["stash_ref"]), timeout=120)
         log(f"  resume #{c.pr}: restored candidate @{candidate_head[:12]} (public CAS remains {c.head[:12]})")
         return True
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        log(f"  resume #{c.pr}: checkpoint restore skipped ({exc})")
-        return False
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise NoProgress(f"resume #{c.pr}: restore failed; candidate preserved, preparation blocked") from exc
 
 
 def _clear_resume(w: Worker, c: Candidate) -> None:
-    """Remove only the exact-head checkpoint after a productive round."""
-    meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+    """Clear only a verified published candidate, with no later dirty or unpublished work.
+
+    Equality intentionally requires the exact local commit: foreign head movement, comment-only
+    contests, unknown queries and normal process exit are insufficient publication evidence.
+    """
     try:
-        subprocess.run(["git", "-C", str(w.cfg.checkout), "update-ref", "-d", commit_ref], timeout=30)
-        subprocess.run(["git", "-C", str(w.cfg.checkout), "update-ref", "-d", stash_ref], timeout=30)
-        meta_path.unlink(missing_ok=True)
-    except (OSError, subprocess.SubprocessError):
-        pass
+        head = _resume_git(w, "rev-parse", "HEAD")
+        if head == c.head or _resume_git(w, "status", "--porcelain", "--untracked-files=all"):
+            return
+        remote = w.gh.pr_progress_state(c.pr)
+        if remote is None or remote.get("head") != head:
+            return
+        meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            # A stashed generation has not been published merely because its base commit was pushed.
+            if meta.get("stash_ref") or meta.get("candidate_head") != head:
+                return
+            _resume_git(w, "update-ref", f"refs/tauceti-published/{c.pr}", head)
+            _resume_git(w, "update-ref", "-d", commit_ref)
+            _resume_git(w, "update-ref", "-d", stash_ref)
+            meta_path.unlink()
+    except (OSError, subprocess.SubprocessError, ValueError, NoProgress):
+        return  # absence of publication proof always retains recovery
 
 
 def _refund_infra_failure(w, c, label: str, charged: tuple[str, ...], reason: str | None = None) -> None:
@@ -981,8 +1004,8 @@ def _do_fixlike(
     """Shared shape for fix / fix-ci / rebase: take the branch claim, then run the agent against the PR
     branch — in bubble (it checks out the PR inside the container) or on the host checkout.
 
-    `charged` names the per-PR counters the caller already spent, so a provider outage can hand them
-    back (see _refund_infra_failure)."""
+    `charged` names counters to spend after a successful claim and before checkout. Only a
+    narrowly classified no-work provider outage refunds them."""
     pr, head = c.pr, c.head
     p = next((x for x in sv.open_prs if x.number == pr), None)
     if p is None:
@@ -995,6 +1018,8 @@ def _do_fixlike(
         return None
     if not w.claims.begin_branch_work(pr, head, p.head_ref, p.head_owner, p.head_repo):
         return None  # claimed elsewhere → caller tries the next candidate
+    for key in charged:
+        w.counters.incr(key)
     prompt = fill_prompt(HERE / "prompts" / prompt_file, PR=pr, AGENT=opts.agent_name, BIN=wrapper_bin(bubble))
     if bubble:
         # The PR's head repo (its own fork, for a fork-PR) gets git fetch/push in the bubble. bubble also
@@ -1003,6 +1028,7 @@ def _do_fixlike(
             w, f"{TAUCETI}/pull/{pr}", prompt, opts, allow_push=f"{p.head_owner}/{p.head_repo}"
         )  # bubble checks out the PR inside
     else:
+        _recover_active_checkout(w)
         if not prepare_checkout(w.cfg):
             log(f"checkout failed for #{pr} — skipping this attempt")
             report_failure(f"{label} #{pr}: checkout preparation failed", code=1)
@@ -1027,14 +1053,32 @@ def _do_fixlike(
         # exact public head that admitted this round, not against the private checkpoint commit.
         os.environ["TAUCETI_PUSH_EXPECT"] = head if resumed else checked
         log(f"  {label} #{pr}: checked out @ {checked[:12]}")
-        rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
+        _write_resume_meta(_active_resume_path(w), {"pr": pr, "public_head": head, "stage": label})
+        # run_agent_host returns/raises only after its writer process group is quiescent. A hard
+        # supervisor kill leaves active metadata for next-round recovery before prepare_checkout.
+        prior_active = os.environ.get("TAUCETI_ACTIVE_CHECKOUT")
+        os.environ["TAUCETI_ACTIVE_CHECKOUT"] = str(_active_resume_path(w))
+        try:
+            rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
+        finally:
+            if prior_active is None:
+                os.environ.pop("TAUCETI_ACTIVE_CHECKOUT", None)
+            else:
+                os.environ["TAUCETI_ACTIVE_CHECKOUT"] = prior_active
+            if not agent_quiescent():
+                raise NoProgress("author is not quiescent; capture and checkout preparation blocked")
+            _checkpoint_resume(w, c, label)
+            w.rc.author_pr = pr
+            w.rc.author_head = _resume_git(w, "rev-parse", "HEAD")
+            _active_resume_path(w).unlink(missing_ok=True)
     if rc == 0:
+        if not check_claim_health():
+            return 75  # preservation is complete; lease loss cannot certify productive completion
         w.rs.bust(pr)
-        _clear_resume(w, c)
+        if not bubble:
+            _clear_resume(w, c)
     else:
         reason = take_last_agent_infra_failure()
-        if reason and ("capacity" in reason or "could not reach" in reason or "provider returned" in reason):
-            _checkpoint_resume(w, c, label)
         _refund_infra_failure(w, c, label, charged, reason=reason)  # raises NoProgress when provider fault
     return rc
 
@@ -1042,21 +1086,17 @@ def _do_fixlike(
 def do_fix(w, sv, c, opts, bubble) -> int | None:
     pr, head = c.pr, c.head
     key = f"fix-{pr}-{head[:12]}"
-    w.counters.incr(key)  # count up front (an un-checkout-able PR mustn't loop)
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="fix.md", label="fix", charged=(key,))
 
 
 def do_fix_ci(w, sv, c, opts, bubble) -> int | None:
     pr, head = c.pr, c.head
     keys = (f"ci-{pr}-{head[:12]}", f"ci-pr-{pr}")
-    for key in keys:
-        w.counters.incr(key)
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="fix-ci.md", label="fix-ci", charged=keys)
 
 
 def do_rebase(w, sv, c, opts, bubble) -> int | None:
     key = f"rebase-pr-{c.pr}"
-    w.counters.incr(key)
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="rebase.md", label="rebase", charged=(key,))
 
 
@@ -1065,8 +1105,6 @@ def do_bump(w, sv, c, opts, bubble) -> int | None:
     shape as a fix: claim the branch, check the PR out, drive the agent on prompts/bump.md to green it."""
     pr, head = c.pr, c.head
     keys = (f"bump-{pr}-{head[:12]}", f"bump-pr-{pr}")  # count up front so an un-checkout-able PR can't loop
-    for key in keys:
-        w.counters.incr(key)
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="bump.md", label="bump", charged=keys)
 
 

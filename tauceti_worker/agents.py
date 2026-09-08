@@ -6,11 +6,14 @@ from __future__ import annotations
 import functools
 import json
 import os
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -467,8 +470,49 @@ def sync_mathlib_pool(cfg: Config) -> None:
         log(f"mathlib cache pool: promoted {promoted}, hydrated {hydrated} ({pool})")
 
 
+def _checkout_preserved(cfg: Config) -> bool:
+    """Never clean dirty files or detach the only reachable unpublished commit."""
+    co = cfg.checkout
+    if not (co / ".git").exists():
+        return True
+    try:
+
+        def git(*args):
+            return subprocess.run(["git", "-C", str(co), *args], capture_output=True, text=True, timeout=30)
+
+        status = git("status", "--porcelain", "--untracked-files=all")
+        if status.returncode or status.stdout.strip():
+            log("checkout: dirty or unreadable state; preservation required before preparation")
+            return False
+        state = getattr(cfg, "state", None)
+        if state and (state / "resume" / "active-checkout.json").exists():
+            log("checkout: interrupted author metadata requires recovery before preparation")
+            return False
+        refs = git(
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes",
+            "refs/tauceti-resume",
+            "refs/tauceti-resume-history",
+            "refs/tauceti-published",
+        )
+        if refs.returncode or not refs.stdout.strip():
+            log("checkout: no verified remote or recovery reference; preparation blocked")
+            return False
+        unmatched = git("rev-list", "-1", "HEAD", "--not", *refs.stdout.splitlines())
+        if unmatched.returncode or unmatched.stdout.strip():
+            log("checkout: unpublished commit lacks a recovery reference; preparation blocked")
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        log("checkout: could not verify preservation; preparation blocked")
+        return False
+
+
 def prepare_checkout(cfg: Config) -> bool:
-    """Clean checkout of TauCeti main; keep .lake for fast rebuilds, drop every other leftover."""
+    """Prepare main only after source edits and unpublished commits are safely retained."""
+    if not _checkout_preserved(cfg):
+        return False
     sync_mathlib_pool(cfg)
     co = cfg.checkout
     if not (co / ".git").is_dir():
@@ -500,8 +544,8 @@ def prepare_checkout(cfg: Config) -> bool:
                 continue
         log(f"checkout: git checkout failed ({detail})")
         return False
-    g("clean", "-fdxq", "-e", ".lake")
-    return True
+    # Ignored files are not included in the source checkpoint; do not erase them.
+    return g("clean", "-fdq", "-e", ".lake") == 0
 
 
 def _quarantine_stale_index_lock(co: Path, *, min_age_s: float = 300.0) -> Path | None:
@@ -714,6 +758,48 @@ def classify_agent_failure(text: str) -> str | None:
 # and it keeps run_agent_proc's `-> int` contract intact for its several callers. Written on every
 # non-zero exit, including the bubble path, which funnels through the same function.
 _LAST_AGENT_FAILURE: str | None = None
+_AGENT_QUIESCENT = True
+
+
+def agent_quiescent() -> bool:
+    return _AGENT_QUIESCENT
+
+
+def _stop_agent_group(proc) -> None:
+    """Quiesce the agent's own group before any checkout checkpoint is captured."""
+    if not hasattr(proc, "pid"):  # simple transcript test doubles have no OS process
+        proc.wait()
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        except PermissionError as exc:
+            raise NoProgress("author process group could not be stopped; candidate capture blocked") from exc
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            continue
+        for _ in range(20):
+            ps = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, timeout=10)
+            if ps.returncode:
+                raise NoProgress("author process status unreadable; candidate capture blocked")
+            live = False
+            for line in ps.stdout.splitlines():
+                fields = line.split()
+                if len(fields) != 2 or fields[1].startswith("Z"):
+                    continue
+                try:
+                    if os.getpgid(int(fields[0])) == proc.pid:
+                        live = True
+                        break
+                except ProcessLookupError:
+                    continue
+            if not live:
+                return
+            time.sleep(0.05)
+    raise NoProgress("author descendants still running; candidate capture blocked")
 
 
 def take_last_agent_infra_failure() -> str | None:
@@ -760,6 +846,11 @@ def run_agent_proc(
         tail.extend(rendered.splitlines())
 
     def run_rendered(destination) -> int:
+        from .round import check_claim_health
+
+        global _AGENT_QUIESCENT
+        if not check_claim_health():
+            return 75
         proc = subprocess.Popen(
             argv,
             cwd=cwds,
@@ -770,23 +861,64 @@ def run_agent_proc(
             text=True,
             errors="replace",
             bufsize=1,
+            # Stay in the native round session for supervisor cleanup on hard kill, but own
+            # a group so normal completion/cancellation can stop writers before capture.
+            process_group=0,
         )
+        _AGENT_QUIESCENT = False
         assert proc.stdout is not None
+        lines: queue.Queue = queue.Queue()
+
+        def read_lines():
+            try:
+                for line in proc.stdout:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+
+        reader = threading.Thread(target=read_lines, daemon=True)
+        reader.start()
         try:
-            for line in proc.stdout:
+            active_path = env.get("TAUCETI_ACTIVE_CHECKOUT")
+            if active_path and hasattr(proc, "pid"):
+                path = Path(active_path)
+                meta = json.loads(path.read_text(encoding="utf-8"))
+                meta["author_pgid"] = proc.pid
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+                os.replace(tmp, path)
+            while True:
+                if not check_claim_health():
+                    return 75
+                try:
+                    line = lines.get(timeout=0.25)
+                except queue.Empty:
+                    # A child may retain the output pipe after its leader exits. Stop it
+                    # instead of waiting forever for EOF from a detached build/poll loop.
+                    if hasattr(proc, "poll") and proc.poll() is not None:
+                        break
+                    continue
+                if line is None:
+                    break
                 rendered = renderer.render_line(line)
                 if rendered:
                     write_rendered(destination, rendered)
-        except BaseException:
-            proc.kill()
-            proc.wait()
-            raise
+            if hasattr(proc, "poll"):
+                while proc.poll() is None:
+                    if not check_claim_health():
+                        return 75
+                    time.sleep(0.25)
+            rc = proc.wait()
+            if not check_claim_health():
+                return 75
+            if provider in {"codex", "claude"} and not renderer.active:
+                write_rendered(destination, f"[warning] no structured {provider} events were recognized\n")
+            return rc
         finally:
+            _stop_agent_group(proc)
+            _AGENT_QUIESCENT = True
+            reader.join(timeout=2)
             proc.stdout.close()
-        rc = proc.wait()
-        if provider in {"codex", "claude"} and not renderer.active:
-            write_rendered(destination, f"[warning] no structured {provider} events were recognized\n")
-        return rc
 
     def classify_rendered_failure() -> str | None:
         # A refund asserts that the agent never ran. Structured work events are stronger evidence
