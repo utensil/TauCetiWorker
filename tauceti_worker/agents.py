@@ -467,8 +467,60 @@ def sync_mathlib_pool(cfg: Config) -> None:
         log(f"mathlib cache pool: promoted {promoted}, hydrated {hydrated} ({pool})")
 
 
+def continuation_checkout(
+    cfg: Config,
+    branch: str,
+    public_head: str,
+    *,
+    saved_head: str = "",
+    saved_payload: bool = False,
+    unfinished_only: bool = False,
+) -> bool | None:
+    """Return True to reuse the exact target, False to prepare safely, or None to preserve ambiguity."""
+    co = cfg.checkout
+    if not co.exists():
+        return False
+
+    def git(*args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(co), *args], capture_output=True, text=True, errors="replace", timeout=30
+        )
+
+    try:
+        current = git("symbolic-ref", "--quiet", "--short", "HEAD")
+        status = git("status", "--porcelain", "--untracked-files=all")
+        target = git("show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        if status.returncode or current.returncode not in (0, 1) or target.returncode not in (0, 1):
+            return None
+        target_head = git("rev-parse", f"refs/heads/{branch}").stdout.strip() if target.returncode == 0 else ""
+        if target.returncode == 0 and not target_head:
+            return None
+        dirty, current_branch = bool(status.stdout.strip()), current.stdout.strip()
+        if current.returncode or (current_branch != branch and dirty):
+            return None
+        local_main = git("show-ref", "--verify", "--quiet", "refs/heads/main")
+        if local_main.returncode not in (0, 1):
+            return None
+        if local_main.returncode == 0:
+            if git("merge-base", "--is-ancestor", "refs/heads/main", "origin/main").returncode:
+                return None
+        if not target_head:
+            return False
+        based = git("merge-base", "--is-ancestor", public_head, target_head)
+        saved = git("merge-base", "--is-ancestor", saved_head, target_head) if saved_head else None
+        if based.returncode or (saved is not None and saved.returncode not in (0, 1)):
+            return None
+        if saved_payload or (saved is not None and saved.returncode == 1):
+            return None if dirty else False
+        if current_branch != branch and git("checkout", "-q", branch).returncode:
+            return None
+        return not unfinished_only or dirty or target_head != public_head
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def prepare_checkout(cfg: Config) -> bool:
-    """Clean checkout of TauCeti main; keep .lake for fast rebuilds, drop every other leftover."""
+    """Clean checkout of TauCeti main; retain ignored build artifacts for a later continuation."""
     sync_mathlib_pool(cfg)
     co = cfg.checkout
     if not (co / ".git").is_dir():
@@ -500,7 +552,7 @@ def prepare_checkout(cfg: Config) -> bool:
                 continue
         log(f"checkout: git checkout failed ({detail})")
         return False
-    g("clean", "-fdxq", "-e", ".lake")
+    g("clean", "-fdq", "-e", ".lake")  # retain ignored build artifacts for exact-target continuation
     return True
 
 
