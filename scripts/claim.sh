@@ -143,11 +143,11 @@ cmd_acquire() {
     push_cas "$ref" "$cur" "$oid"
 }
 cmd_renew() {
-    local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner n oid rc attempt
+    local key="$1" ttl="${2:-$DEFAULT_TTL}" ref cur js owner n oid rc _attempt
     ref=$(ref_of "$key"); ensure_repo || return 2
     # One bounded retry tolerates another renewal by this same owner. Reread and revalidate
     # ownership each time; a race never authorizes an unconditional write.
-    for attempt in 1 2; do
+    for _attempt in 1 2; do
         n=$(now)
         cur=$(remote_oid "$ref") || return $?
         js=$(lease_json "$cur" "$ref") || return $?
