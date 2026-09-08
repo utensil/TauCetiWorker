@@ -39,12 +39,24 @@ claim() {
 }
 [[ -n "$REF" ]] || die "no destination branch (set TAUCETI_PUSH_REF or pass it as an argument)"
 
-# 1) Lease check (fail closed if we no longer hold the claim someone may have taken over).
-if [[ -n "$CLAIM_KEY" && -x "$CLAIM_SH" ]]; then
-    if ! claim holds "$CLAIM_KEY"; then
-        claim renew "$CLAIM_KEY" >/dev/null 2>&1 \
-            || die "lease '$CLAIM_KEY' lost (another agent took over) — refusing to push"
+# 1) A configured claim is required. Unknown transport/payload state is never ownership loss.
+if [[ -n "$CLAIM_KEY" ]]; then
+    [[ -x "$CLAIM_SH" ]] || die "required claim helper unavailable: $CLAIM_SH — refusing to push"
+    claim holds "$CLAIM_KEY"; claim_rc=$?
+    # Only an expired lease owned by us may be renewed here. Missing/malformed/unknown leases
+    # require a new admitted round; a generic failed check is not permission to acquire.
+    if [[ "$claim_rc" == 5 ]]; then
+        claim renew "$CLAIM_KEY"; claim_rc=$?
     fi
+    case "$claim_rc" in
+        0) ;;
+        1) die "lease '$CLAIM_KEY': other owner — refusing to push";;
+        3) die "lease '$CLAIM_KEY': absent — refusing to push";;
+        4) die "lease '$CLAIM_KEY': malformed — refusing to push";;
+        5) die "lease '$CLAIM_KEY': expired — refusing to push";;
+        6) die "lease '$CLAIM_KEY': renewal CAS race — refusing to push";;
+        *) die "lease '$CLAIM_KEY': check failed (ownership unknown, rc=$claim_rc) — refusing to push";;
+    esac
 fi
 
 # 2) Branch-level CAS push. expected="" ⇒ create-only; else must still equal the observed oid.

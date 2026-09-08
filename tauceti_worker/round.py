@@ -16,6 +16,23 @@ from .constants import CLAIM_HEARTBEAT_S, CLAIM_TTL_S, ROUND_TIMEOUT
 from .github import claims_repo
 from .paths import CLAIM_SH, self_argv, self_env
 
+CLAIM_COMMAND_TIMEOUT_S = 35
+_CLAIM_OUTCOMES = {
+    1: "other-owner",
+    2: "command/transport-error",
+    3: "absent",
+    4: "malformed",
+    5: "expired",
+    6: "CAS-race",
+}
+_ACTIVE_CLAIMS: Claims | None = None
+
+
+def check_claim_health() -> bool:
+    """Agent runners poll this even while the provider is silent; no active lease means no guard."""
+    return _ACTIVE_CLAIMS is None or _ACTIVE_CLAIMS.check_health()
+
+
 # ============================================================================
 # Round lifecycle — flock (one round per worker), signal handling, cleanup, and
 # the loop→child spawn with process-group teardown.
@@ -172,6 +189,57 @@ def reap_round_group(pgid: int, term_grace: float = 2.0) -> None:
         log(f"WARNING: round group {pgid} ignored SIGTERM and refused SIGKILL; stragglers may survive")
 
 
+def _session_groups(session_id: int) -> set[int]:
+    """Enumerate PID/state only, then ask the kernel for session/group identity (portable on Darwin)."""
+    try:
+        result = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, timeout=5, check=True)
+        rows = [line.split() for line in result.stdout.splitlines()]
+        pids = [int(row[0]) for row in rows if len(row) == 2 and not row[1].startswith("Z")]
+        if any(len(row) != 2 for row in rows) or os.getpid() not in pids:
+            raise ValueError("invalid or incomplete process inventory")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise Die("cannot enumerate round session safely; operator cleanup required") from exc
+    groups = set()
+    for pid in pids:
+        try:
+            if os.getsid(pid) == session_id:
+                group = os.getpgid(pid)
+                if os.getsid(pid) == session_id:
+                    groups.add(group)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            raise Die("cannot verify process session; operator cleanup required") from exc
+    return groups
+
+
+def reap_round_session(session_id: int, term_grace: float = 2.0) -> None:
+    """Sweep dedicated agent groups that remain in this round's original session.
+
+    Agent groups may outlive their leader or the round (including SIGKILL). Kernel session identity
+    avoids a registration-file race and never selects the loop or an unrelated direct agent session.
+    """
+    if session_id == os.getsid(0):
+        raise Die("refusing to sweep the caller's own session")
+    deadline = time.monotonic() + term_grace
+    kill_deadline = deadline + 1.0
+    while True:
+        groups = _session_groups(session_id)
+        if not groups:
+            return
+        sig = signal.SIGTERM if time.monotonic() < deadline else signal.SIGKILL
+        for group in groups:
+            if signal_group(group, sig) == "denied":
+                raise Die(f"round session {session_id} group {group} cannot be reaped; operator cleanup required")
+        if time.monotonic() >= kill_deadline:
+            if _session_groups(session_id):
+                raise Die(
+                    f"round session {session_id} still has live processes after SIGKILL; operator cleanup required"
+                )
+            return
+        time.sleep(0.05)
+
+
 class Claims:
     """[COOP] branch claims + the [HARD] push-arbiter env. Mutating tasks take a branch/<pr> claim and
     heartbeat it (dedup only; git-safe-push's branch CAS is the real guarantee). The heartbeat is a
@@ -187,8 +255,8 @@ class Claims:
         self._hb_wfd: int | None = None
 
     def begin_branch_work(self, pr: int, head: str, refname: str, owner: str, repo: str) -> bool:
-        """Take the branch claim and set the push-arbiter env. Returns False if claimed elsewhere
-        (caller skips this PR — dedup). A claim error is non-fatal: proceed unclaimed (CAS still protects).
+        """Take the branch claim and set the push-arbiter env. Returns False unless ownership is
+        positively established. Unknown ownership must not admit expensive branch-authoring work.
 
         The claim goes to the worker's claim namespace, NOT to the PR's head repository: `branch/<pr>`
         is keyed on the canonical PR number, so two workers contend for it wherever they are, whereas a
@@ -197,29 +265,33 @@ class Claims:
         key = f"branch/{pr}"
         claim_repo = claims_repo()
         claim_env = {**os.environ, "CLAIM_REPO": claim_repo}
-        rc = subprocess.run([CLAIM_SH, "acquire", key, str(CLAIM_TTL_S)], capture_output=True, env=claim_env).returncode
-        if rc == 1:
-            log(f"branch #{pr} claimed by another worker — skipping (COOP dedup)")
+        try:
+            rc = subprocess.run(
+                [CLAIM_SH, "acquire", key, str(CLAIM_TTL_S)],
+                capture_output=True,
+                env=claim_env,
+                timeout=CLAIM_COMMAND_TIMEOUT_S,
+            ).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            rc = 2
+        if rc != 0:
+            reason = _CLAIM_OUTCOMES.get(rc, "helper-error")
+            log(f"branch #{pr} claim unavailable ({reason}, rc={rc}) — deferring authoring")
             return False
         os.environ["TAUCETI_PUSH_REF"] = refname
         os.environ["TAUCETI_PUSH_EXPECT"] = head
         os.environ["TAUCETI_PUSH_REMOTE"] = f"https://github.com/{owner}/{repo}"
         os.environ["TAUCETI_CLAIM_SH"] = CLAIM_SH
-        if rc == 0:
-            self.held = (key, claim_repo)
-            # Keep this scoped to the push arbiter: unrelated agent-invoked claims remain canonical.
-            os.environ["TAUCETI_CLAIM_REPO"] = claim_repo
-            os.environ["TAUCETI_CLAIM_KEY"] = key
-            self.ctx.add_cleanup(self.release)
+        self.held = (key, claim_repo)
+        os.environ["TAUCETI_CLAIM_REPO"] = claim_repo
+        os.environ["TAUCETI_CLAIM_KEY"] = key
+        self.ctx.add_cleanup(self.release)
+        try:
             self.start_heartbeat(key, claim_repo)
-        else:
-            log(
-                f"claim acquire #{pr} errored (rc={rc}) against {claim_repo} — proceeding unclaimed "
-                f"(branch CAS still protects). If this repeats, this account cannot push there; set "
-                f"CLAIM_REPO=<a repo your whole fleet can push to> to pick the namespace yourself."
-            )
-            os.environ.pop("TAUCETI_CLAIM_KEY", None)
-            os.environ.pop("TAUCETI_CLAIM_REPO", None)
+        except OSError:
+            log(f"branch #{pr}: heartbeat failed to start — deferring authoring")
+            self.release()
+            return False
         return True
 
     def start_heartbeat(self, key: str, claim_repo: str) -> None:
@@ -234,12 +306,33 @@ class Claims:
                 "CLAIM_TTL": str(CLAIM_TTL_S),
             }
         )
-        self._hb = subprocess.Popen(cmd, pass_fds=[rfd], env=env)
+        try:
+            self._hb = subprocess.Popen(cmd, pass_fds=[rfd], env=env)
+        except BaseException:
+            os.close(rfd)
+            os.close(wfd)
+            raise
+        global _ACTIVE_CLAIMS
+        _ACTIVE_CLAIMS = self
+        self._health_reported = False
         os.close(rfd)  # parent keeps only the write end; its closure (or death) is the EOF signal
         self._hb_wfd = wfd
         self.ctx.add_cleanup(self.stop_heartbeat)
 
+    def check_health(self) -> bool:
+        rc = self._hb.poll() if self._hb is not None else 2
+        if rc is None:
+            return True
+        if not getattr(self, "_health_reported", False):
+            reason = _CLAIM_OUTCOMES.get(rc, "heartbeat-exited")
+            log(f"branch claim heartbeat unavailable ({reason}, rc={rc}) — stop and preserve candidate")
+            self._health_reported = True
+        return False
+
     def stop_heartbeat(self) -> None:
+        global _ACTIVE_CLAIMS
+        if _ACTIVE_CLAIMS is self:
+            _ACTIVE_CLAIMS = None
         if self._hb_wfd is not None:
             try:
                 os.close(self._hb_wfd)  # EOF → the heartbeat child exits on its own
@@ -250,41 +343,77 @@ class Claims:
             try:
                 self._hb.terminate()
                 self._hb.wait(5)
-            except Exception:
+            except subprocess.TimeoutExpired:
+                self._hb.kill()
+                self._hb.wait(5)
+            except OSError:
                 pass
             self._hb = None
 
     def release(self) -> None:
         if self.held:
             key, claim_repo = self.held
-            subprocess.run(
-                [CLAIM_SH, "release", key], capture_output=True, env={**os.environ, "CLAIM_REPO": claim_repo}
-            )
+            try:
+                result = subprocess.run(
+                    [CLAIM_SH, "release", key],
+                    capture_output=True,
+                    env={**os.environ, "CLAIM_REPO": claim_repo},
+                    timeout=CLAIM_COMMAND_TIMEOUT_S,
+                )
+                if result.returncode:
+                    log(f"claim release unavailable (rc={result.returncode}); leaving lease to expire")
+            except (OSError, subprocess.TimeoutExpired):
+                log("claim release failed/timed out; leaving lease to expire")
             self.held = None
             os.environ.pop("TAUCETI_CLAIM_KEY", None)
             os.environ.pop("TAUCETI_CLAIM_REPO", None)
 
 
 def cmd_heartbeat(args) -> int:
-    """Internal: renew a claim lease every CLAIM_HEARTBEAT_S until the parent dies (pipe EOF) or the
-    lease is lost. Never runs the round's cleanup (default signal disposition, no RoundContext)."""
+    """Return the typed renewal failure to the parent; bound renewal and stop on parent pipe EOF."""
     import select
 
-    key = args.key
-    ppipe = args.ppipe
-    while True:
-        if ppipe is not None:
-            r, _, _ = select.select([ppipe], [], [], CLAIM_HEARTBEAT_S)
-            if r:  # readable ⇒ EOF (we never write to the pipe) ⇒ parent gone
-                try:
-                    if os.read(ppipe, 1) == b"":
-                        return 0
-                except OSError:
+    def parent_gone(delay: float) -> bool:
+        if args.ppipe is None:
+            time.sleep(delay)
+            return False
+        try:
+            ready, _, _ = select.select([args.ppipe], [], [], delay)
+            return bool(ready) and os.read(args.ppipe, 1) == b""
+        except OSError:
+            return True
+
+    # A parent-requested shutdown must unwind the active renewal child too.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    while not parent_gone(CLAIM_HEARTBEAT_S):
+        try:
+            proc = subprocess.Popen(
+                [CLAIM_SH, "renew", args.key],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return 2
+        try:
+            deadline = time.monotonic() + CLAIM_COMMAND_TIMEOUT_S
+            while proc.poll() is None:
+                if parent_gone(0.1):
                     return 0
-        else:
-            time.sleep(CLAIM_HEARTBEAT_S)
-        if subprocess.run([CLAIM_SH, "renew", key], capture_output=True).returncode != 0:
-            return 0  # lease lost → stop renewing so it can expire
+                if time.monotonic() >= deadline:
+                    return 2
+            if proc.returncode != 0:
+                return proc.returncode if proc.returncode > 0 else 2
+        finally:
+            if proc.poll() is None:
+                signal_group(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(2)
+                except subprocess.TimeoutExpired:
+                    signal_group(proc.pid, signal.SIGKILL)
+                    proc.wait(2)
+            reap_round_group(proc.pid, term_grace=0.1)
+    return 0
 
 
 def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> int:
@@ -313,3 +442,4 @@ def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> 
         # runs the round in-process, not through here, so it is not swept; only the unbounded --loop leak
         # is operationally damaging, so that scope gap is acceptable.)
         reap_round_group(pgid)
+        reap_round_session(pgid)
