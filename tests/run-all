@@ -26,6 +26,7 @@ RUN_STDLIB=(
   agent_transcript.py
   auto_stage_priority.py
   authoring_profiles.py
+  bounded_native_round.py
   bubble_cache.py
   bubble_version.py
   branch_claim_repo.py
@@ -70,6 +71,8 @@ RUN_STDLIB=(
   review_daily_cap.py
   review_diagnostics.py
   review_error_round.py
+  review_freshness.py
+  review_incomplete.py
   review_provider_down.py
   review_scope.py
   review_throttles.py

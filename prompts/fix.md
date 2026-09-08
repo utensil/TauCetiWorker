@@ -3,23 +3,30 @@ You are addressing AI code review on pull request #__PR__ of TauCetiProject/TauC
 Quote every complete URL passed to `gh api` (for example `gh api 'repos/OWNER/REPO/git/trees/main?recursive=1'`); zsh expands an unquoted `?` before `gh` receives it.
 
 ## Read the review
-- The review is posted as a sticky scoreboard comment plus one thread per flagged rubric. Read them:
+- Read the current published head, all relevant scoreboard comments, rubric threads, replies, and adjudications (follow pagination when needed):
+  - `gh pr view __PR__ --repo TauCetiProject/TauCeti --json headRefOid`
   - `gh pr view __PR__ --repo TauCetiProject/TauCeti --json comments`
   - `gh api "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments?per_page=100"` (the per-rubric review threads; each root carries a `<!--tauceti-rubric:NAME-->` marker, and the finding text + suggested fix). Keep the complete URL quoted; in zsh an unquoted `?` is a filename glob.
-- The blocking rubrics are the ones marked ⛔ (block) or 🟡 (changes requested) on the scoreboard. The other rubrics are already ✅ approved — note which ones.
+- Reconcile review rounds by the head and rubric revision they evaluated and the subsequent decisions/replies. Identify current blockers (⛔ or 🟡), applicable approvals (✅), unresolved earlier findings, and findings explicitly resolved or superseded. An absent or unevaluated rubric on a partial scoreboard is not approval and does not erase an unresolved finding.
+- Where review instructions conflict, identify the controlling decision and a coherent repair plan; do not alternate between incompatible suggested patches or invent a resolution that the review history does not support.
 
 ## Do not regress what is already green
-The scoreboard shows several rubrics already approved (✅). A re-review re-runs the rubrics you touched, so a change that fixes one blocker but degrades an approved rubric will turn that rubric red and the PR will not converge — this is the single most common reason a nearly-done PR is eventually abandoned. So:
+Preserve the applicable approvals you identified while clearing the unresolved blockers. A change that fixes one blocker but degrades an approved rubric will not converge. So:
 - Make the SMALLEST change that clears each blocker; do not refactor or restructure beyond what the finding requires.
 - Before pushing, re-read the approved rubrics (scope, reuse, generality, api-design, placement, naming, documentation, proof-quality, …) and confirm your change does not undermine any of them — e.g. don't add a less-general lemma (generality), a duplicate of Mathlib (reuse), an unexposed/ misplaced declaration (placement/api-design), or an undocumented public def (documentation).
-- If clearing a blocker would genuinely force a regression of an approved rubric, that tension is a sign the finding may be wrong — contest it (below) with that trade-off as evidence, rather than pushing a change that just moves the redness around.
+- If a proposed fix conflicts with an applicable approval, first look for a coherent alternative within the authorized repair scope. Explain any remaining contradiction with exact review/source evidence; the conflict alone does not establish that the finding is wrong.
+
+## Revise the next action from feedback
+- Before editing or replying, briefly state the published head, the unresolved findings and relevant prior attempts/adjudications, and the next concrete action with its acceptance check. After a rejected contest or an attempt that left the same finding unresolved, explain how the next action addresses that feedback; do not repeat the unchanged argument or claim a previous attempt succeeded without evidence.
+- Prefer a corrective code change within the authorized scope when the rejection identifies a valid defect. Repeat a contest only with materially new evidence or an explicit changed decision, and directly answer the reason for rejection. If a real scope or review-contract contradiction prevents a valid next action, report the precise decision needed and preserve the candidate. A no-change attempt by itself is not an attempt ceiling or a reason to abandon the target.
+- For a repair that changes a mathematical representation or its operations, map its relevant fields to existing Mathlib/library representations before inventing replacements, and check the intended interpretation with a proportionate witness or preservation law capable of exposing the reported defect. Compilation and self-consistent operation laws alone do not establish that interpretation; a routine proof or naming fix does not require a new model or witness framework.
 
 ## Decide, per finding, on its merits
 For each finding, judge whether it is actually correct:
 - **If it is correct**, fix the code. Verify the fix empirically (does it build? does the claimed Mathlib lemma actually exist — `grep`/`#check`? does the suggested `@[simp]` lemma have a variable head, which the linter forbids?). Reviewers are sometimes confidently wrong; do not blindly comply.
 - **If it is wrong**, do NOT comply. Reply on that rubric's thread explaining why, with evidence (a synth-check, a Mathlib citation, a build error). Post the reply to the thread root:
   `gh api -X POST "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies" -f body="..."`
-  (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.)
+  (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.) Before making a public claim about code on the PR, re-read the published head and verify the cited declarations/behavior at that exact head; identify any evidence from an unpublished local candidate explicitly.
 
 ## Rules of the repo (hard constraints)
 - Code goes under `TauCeti/`. Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds every module under `TauCeti/`, so there is no need to touch it (if a reviewer claims your API is not reachable from the root, the glob already covers it). Do NOT touch `Scripts/`, `.github/`, the lakefile (`lakefile.toml`/`lakefile.lean`), or the Lake pins (`lake-manifest.json`/`lean-toolchain`) — the lakefile is human-owned, and forward Mathlib/toolchain bumps are a separate dedicated flow; keep this PR to `TauCeti/`.
@@ -35,12 +42,12 @@ lake exe axioms
 ```
 Iterate until green. Never push red.
 
-Run each command synchronously in a single foreground shell invocation with a generous timeout. Do
-not use the interactive `write_stdin`/session-polling tool for a long-running cache or build command:
-its transient process handle can disappear before the result is returned. If a tool call yields a
-session id anyway, rerun the command with a longer foreground timeout rather than polling that id.
+Launch each command once as the authoritative foreground invocation, with a generous timeout. If the
+tool yields a session id, poll that same session until it finishes; do not start a duplicate command.
+If the session handle is lost, inspect the process and its receipt/result before proceeding, and do
+not restart the command until the prior process is known to have ended.
 
-**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
+**Complete the active round synchronously.** Run these commands in the FOREGROUND and wait for each to finish; do not leave an unobserved background build. Commit and safely publish verified fixes when possible. If interrupted or blocked, preserve the local candidate and report the unfinished step and observed result; do not discard useful work or claim an unverified check or publication succeeded. Pushing updates the PR; local work may remain unpublished and must not be treated as disposable.
 
 ## Submit
 - Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
@@ -52,4 +59,4 @@ session id anyway, rerun the command with a longer foreground timeout rather tha
 - Do NOT open a new PR; do NOT touch other files.
 
 ## Report
-End with a concise summary: which findings you fixed (and how you verified each), which you contested (and the evidence), and the exact `lake build` / `lake exe axioms` result lines proving green + axiom-clean. Do not claim green unless you saw it.
+End with a concise summary: which findings you fixed (and how you verified each), which you contested (and the new evidence and response to any prior rejection), remaining findings and the revised next action or precise blocker, and the exact `lake build` / `lake exe axioms` result lines proving green + axiom-clean. Distinguish the published head from an unpublished candidate. Do not claim green unless you saw it.

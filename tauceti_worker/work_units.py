@@ -21,6 +21,7 @@ from .agents import (
     _codex_review_effort_override,
     _codex_review_model_override,
     _kiro_review_model,
+    _review_engine_source,
     _review_engine_uvx_source,
     fetch_git_source,
     fetch_ref,
@@ -70,6 +71,7 @@ from .review_diagnostics import (
     record_review_failure,
     recover_review_failures,
 )
+from .review_freshness import verify_review_source
 from .review_state import ReviewState
 from .round import Claims, RoundContext
 from .runtime_status import report_failure, report_runtime, runtime_snapshot
@@ -601,6 +603,7 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
 
 
 def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool) -> int:
+    verify_review_source(*_review_engine_source())
     pr, head = c.pr, c.head
     reviewers = opts.work_model
     if reviewers in ("auto", ""):

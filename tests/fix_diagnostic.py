@@ -98,6 +98,19 @@ check(
 )
 
 # --- waiting: head matches but nothing blocks ----------------------------------------------------
+for states in ({"reuse": "error", "naming": "green"}, {"reuse": "absent"}):
+    check(
+        "incomplete review without a finding waits for review",
+        disp(meta({"head_sha": HEAD, "states": states})),
+        "waiting",
+        "incomplete",
+    )
+check(
+    "legacy error-only review waits for review",
+    disp(meta({"head_sha": HEAD, "runs": [{"verdict": "error"}]})),
+    "waiting",
+    "incomplete",
+)
 check(
     "reviewed at head, all green -> waiting (nothing to fix)",
     disp(meta({"head_sha": HEAD, "states": {"reuse": "green"}}), blocking=False),

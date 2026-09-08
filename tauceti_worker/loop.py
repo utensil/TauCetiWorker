@@ -102,6 +102,8 @@ def cmd_loop(
     ignore_quota = getattr(args, "ignore_quota", False)
     bubble = getattr(args, "bubble", False)
     quota_cmd = getattr(args, "quota_cmd", None)
+    max_rounds = getattr(args, "max_rounds", None)
+    quota_timeout_arg = {"timeout": POLL} if max_rounds is not None and quota_cmd else {}
     retry_exhausted_fixes = bool(getattr(args, "retry_exhausted_fixes", False) or retry_exhausted_fixes_enabled())
     log(
         f"loop start: worker={cfg.wid} only={','.join(only) or '(all)'} agent={agent}"
@@ -110,6 +112,7 @@ def cmd_loop(
     )
     report_runtime("idle", worker_id=cfg.wid, detail="loop started", phase=None, target=None, next_action_at=None)
     streak = 0
+    rounds_dispatched = 0
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
     def terminate(_signum, _frame) -> None:
@@ -145,7 +148,7 @@ def cmd_loop(
                 # round to post an all-error scoreboard.
                 if agent == "auto":
                     raise SystemExit("--ignore-quota --loop needs an explicit --agent (codex/claude)")
-                _chosen, snap = choose_model(cfg, agent, quota_cmd, refresh=True, renew=True)
+                _chosen, snap = choose_model(cfg, agent, quota_cmd, refresh=True, renew=True, **quota_timeout_arg)
                 prov = snap.get(agent)
                 verdict = _ignore_quota_verdict(_chosen, prov)
                 # An unopened window is the one hard block --ignore-quota may still clear, because the
@@ -154,6 +157,9 @@ def cmd_loop(
                     verdict, pending_init = "run", True
                 if verdict == "wait":
                     why = prov.error if (prov and prov.error) else (_unavail_reason(prov)[1] if prov else "unavailable")
+                    if max_rounds is not None:
+                        log(f"quota: {agent} hard-blocked ({why}) — finite loop not launching a round")
+                        return EX_NOPROGRESS
                     # Honor the endpoint's Retry-After, else wait until the blocking window is next
                     # eligible (capped), else poll. Never sooner than POLL, so we don't re-trip a 429.
                     nap = max(POLL, int(prov.retry_after) if (prov and prov.retry_after) else 0)
@@ -173,7 +179,7 @@ def cmd_loop(
                     log(f"quota: {agent} over-pace; --ignore-quota set — running anyway")
                 model = agent
             else:
-                model, snap = choose_model(cfg, agent, quota_cmd, refresh=True, renew=True)
+                model, snap = choose_model(cfg, agent, quota_cmd, refresh=True, renew=True, **quota_timeout_arg)
                 if model is None and claude_pending_init(snap):
                     model, pending_init = "claude", True
                 if model is None:
@@ -192,6 +198,9 @@ def cmd_loop(
                     # Neither destination renders Rich markup: log() writes to stderr and a file, and a
                     # runtime-status detail is read back as data.
                     waiting = _wait_quota_line(snap, markup=False)
+                    if max_rounds is not None:
+                        log(f"quota: {waiting} — finite loop not launching a round")
+                        return EX_NOPROGRESS
                     log(f"quota: {waiting} — sleeping {nap}s")
                     report_runtime("waiting-quota", detail=waiting, next_action_at=time.time() + nap)
                     time.sleep(nap)
@@ -205,11 +214,20 @@ def cmd_loop(
             # until the later of their resets. The rate_limit probe is itself exempt, so this is free
             # when we are flush.
             gb = github_budget()
+            if gb is None and max_rounds is not None:
+                log("github: budget unavailable — finite loop not launching a round")
+                return EX_NOPROGRESS
             low = {k: v for k, v in (gb or {}).items() if v[0] < GH_MIN_BUDGET}
             if low:
                 reset = max(v[1] for v in low.values())
                 nap = max(POLL, min(reset - int(time.time()) + 5, 3600))
                 detail = ", ".join(f"{k}={gb[k][0]}" for k in low)
+                if max_rounds is not None:
+                    log(
+                        f"github: REST budget low ({detail} remaining < {GH_MIN_BUDGET}) — "
+                        "finite loop not launching a round"
+                    )
+                    return EX_NOPROGRESS
                 log(
                     f"github: REST budget low ({detail} remaining < {GH_MIN_BUDGET}) — "
                     f"waiting {nap}s for the reset before launching a round"
@@ -266,7 +284,10 @@ def cmd_loop(
             if source is not None:
                 tail += ["--source", source]
             report_runtime("surveying", detail="selecting the next work unit", next_action_at=None)
+            rounds_dispatched += 1
             rc = run_round_subprocess(tail)
+            if max_rounds is not None and rounds_dispatched >= max_rounds:
+                return rc
 
             # 3) Settle: productive → short pause; no-progress/timeout/error → escalating back-off.
             if rc == 0:
@@ -326,7 +347,13 @@ def _ignore_quota_verdict(chosen: str | None, prov: Provider | None) -> str:
 
 
 def choose_model(
-    cfg: Config, agent: str, quota_cmd: str | None, *, refresh: bool = False, renew: bool = False
+    cfg: Config,
+    agent: str,
+    quota_cmd: str | None,
+    *,
+    refresh: bool = False,
+    renew: bool = False,
+    timeout: float | None = None,
 ) -> tuple[str | None, dict]:
     """Decide which model to run now. With --quota-cmd / TAUCETI_QUOTA_CMD set, consult that external
     command instead of the built-in pacer (the escape hatch for e.g. a multi-account scheme): run
@@ -341,7 +368,11 @@ def choose_model(
     if quota_cmd:
         import shlex
 
-        r = subprocess.run(shlex.split(quota_cmd) + [agent], capture_output=True, text=True)
+        try:
+            r = subprocess.run(shlex.split(quota_cmd) + [agent], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            unavailable = Provider("quota-cmd", False, None, error="quota command timed out")
+            return None, {"quota-cmd": unavailable}
         out = (r.stdout or "").split()
         model = out[0] if (r.returncode == 0 and out) else None
         return (model or None), {"quota-cmd": Provider("quota-cmd", bool(model), model)}

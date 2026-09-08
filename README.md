@@ -172,6 +172,21 @@ apply. Old or different-head records do not establish a failure of the current i
 legacy ledger evidence leaves exit-code handling unchanged. This does not classify the underlying
 provider failure or change the external review engine's own within-round retries.
 
+Before every custom-fork review, a model-free GitHub check requires the configured exact engine
+SHA to match the fork's current `dev` head and contain `TauCetiProject/TauCetiReview:main`.
+`TAUCETI_REVIEW_ENGINE_BRANCH` can select a different tracking branch; execution still uses an
+exact SHA. Stale pins, an unsynced fork, branch movement during verification, local checkout
+overrides, and unreadable GitHub responses all refuse the review before claims or model dispatch.
+The loop backs off without charging any PR's error budget. Operators must synchronize and verify
+the Review fork separately, then refresh their managed `TAUCETI_REVIEW_ENGINE_REF` pins; the
+Worker does not merge source or rewrite operator configuration. Default upstream execution is unchanged.
+
+Review execution errors and deferred rubric slots are not author findings: they do not dispatch
+`fix` by themselves. A genuine `request_changes` or `block` still does, including when another
+rubric errored. Review retry eligibility consults durable rubric state, so a successful partial
+round cannot hide a retained error. An intentional early blocking halt is not a failed execution.
+These scheduling rules do not relax the separate all-green merge gate.
+
 Scoped-review production lives on `dev`. Before a new review round, run `scripts/sync-upstream --push`
 from a clean `dev` checkout. It fetches `kim-em/TauCetiWorker:main`, merges that upstream head into
 `dev`, runs the fork's lint and test gates, and pushes the verified production commit. It does not update
