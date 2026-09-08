@@ -136,9 +136,23 @@ class ReviewState:
 
     # --- predicates over the meta (the cascade's clean-head / blocking rules) ---
     def ledger_clean_head(self, pr: int) -> str:
-        runs = self.gh_meta(pr).data.get("runs") or []
-        if runs and all(r.get("verdict") != "error" for r in runs):
-            return str(self.gh_meta(pr).data.get("head_sha") or "")
+        """Return the reviewed head only when durable state has no execution errors.
+
+        An intentional blocker may defer other rubrics; it needs an author fix, not an
+        automatic retry. A partial successful run must not hide another rubric's error.
+        """
+        metadata = self.gh_meta(pr).data
+        states = metadata.get("states") or {}
+        if states:
+            completed = {"green", "stale", "blocking_request", "blocking_block"}
+            if all(state in completed | {"absent"} for state in states.values()) and any(
+                state in completed for state in states.values()
+            ):
+                return str(metadata.get("head_sha") or "")
+            return ""
+        runs = metadata.get("runs") or []
+        if runs and all(run.get("verdict") in ("approve", "request_changes", "block") for run in runs):
+            return str(metadata.get("head_sha") or "")
         return ""
 
     def review_rounds(self, pr: int, counters: Counters) -> int:
@@ -186,20 +200,19 @@ class ReviewState:
         return best
 
     def ledger_blocking(self, pr: int, head: str) -> bool:
-        # Consult the durable per-rubric `states`, not just the latest round's `runs`. A reply/partial
-        # round only re-runs some rubrics, so `runs` can show an approve for one rubric while another
-        # rubric is still `blocking_request` in `states` — keying on `runs` would miss it and `fix`
-        # would never address the blocking rubric (the PR strands). `states` is the same signal CI's
-        # close reads, so the two agree. Falls back to `runs` only for an older scoreboard with no
-        # `states` map. A rubric blocks unless it is green or stale (a carried-forward approval).
+        """Find actionable author findings in durable state, not just the latest partial run.
+
+        Error and absent slots prevent a complete review but request no source change.
+        The merge gate remains separate and still requires its complete green evidence.
+        """
         m = self.gh_meta(pr).data
         if str(m.get("head_sha") or "") != head:
             return False
         states = m.get("states") or {}
         if states:
-            return any(v not in ("green", "stale") for v in states.values())
+            return any(state in ("blocking_request", "blocking_block") for state in states.values())
         runs = m.get("runs") or []
-        return any(r.get("verdict") not in ("approve", "error") for r in runs)
+        return any(run.get("verdict") in ("request_changes", "block") for run in runs)
 
 
 def inflight_review_providers(comments: list[dict] | None, head: str, now: int) -> set[str]:
