@@ -164,6 +164,14 @@ exists only in process arguments.
 
 ### Keeping this scoped-review fork current
 
+A zero review-engine exit does not necessarily mean every rubric completed. If the local ledger
+records a new round for the expected head with rubric execution errors, the Worker publishes the
+partial archive, retains a structural `review-incomplete` diagnostic, and backs off instead of
+reporting success or charging the PR's no-verdict error budget. Existing daily review limits still
+apply. Old or different-head records do not establish a failure of the current invocation; missing
+legacy ledger evidence leaves exit-code handling unchanged. This does not classify the underlying
+provider failure or change the external review engine's own within-round retries.
+
 Before every custom-fork review, a model-free GitHub check requires the configured exact engine
 SHA to match the fork's current `dev` head and contain `TauCetiProject/TauCetiReview:main`.
 `TAUCETI_REVIEW_ENGINE_BRANCH` can select a different tracking branch; execution still uses an
