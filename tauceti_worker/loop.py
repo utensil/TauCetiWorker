@@ -11,7 +11,16 @@ import time
 
 from .agents import resolve_authoring_profile
 from .config import Config, NoProgress, log, retry_exhausted_fixes_enabled
-from .constants import BACKOFF_BASE, BACKOFF_MAX, EX_NOPROGRESS, GH_MIN_BUDGET, INTERROUND, OPENROUTER_MODELS, POLL
+from .constants import (
+    BACKOFF_BASE,
+    BACKOFF_MAX,
+    EX_NOPROGRESS,
+    GH_MIN_BUDGET,
+    INTERROUND,
+    OPENROUTER_MODELS,
+    POLL,
+    ROUND_TIMEOUT,
+)
 from .github import github_budget
 from .quota import Provider, Quota, _glyph, _hours, _unavail_reason, quota_line
 from .round import run_round_subprocess
@@ -97,7 +106,12 @@ def cmd_loop(
     """The driver: pace against quota (codex preferred), run ONE round as a child under a hard timeout,
     then settle (short pause if productive, escalating back-off otherwise). Ctrl-C stops the current
     round and exits. Keeps the escalating back-off that stopped ~700 no-op rounds hammering a
-    rate-limited GitHub."""
+    rate-limited GitHub. With max_rounds, exit on blocked preflight or after that many child
+    dispatches, returning the last child status without the final settle sleep."""
+    max_rounds = getattr(args, "max_rounds", None)
+    if max_rounds is not None and (isinstance(max_rounds, bool) or not isinstance(max_rounds, int) or max_rounds <= 0):
+        raise ValueError("max_rounds must be a positive integer")
+    rounds = 0
     unpaced = agent in OPENROUTER_MODELS or agent == "kiro"
     ignore_quota = getattr(args, "ignore_quota", False)
     bubble = getattr(args, "bubble", False)
@@ -107,6 +121,7 @@ def cmd_loop(
         f"loop start: worker={cfg.wid} only={','.join(only) or '(all)'} agent={agent}"
         f" retry_exhausted_fixes={'owned-only' if retry_exhausted_fixes else 'off'}"
         f"{' [bubble]' if bubble else ''}"
+        f"{f' max_rounds={max_rounds}' if max_rounds is not None else ''}"
     )
     report_runtime("idle", worker_id=cfg.wid, detail="loop started", phase=None, target=None, next_action_at=None)
     streak = 0
@@ -154,6 +169,10 @@ def cmd_loop(
                     verdict, pending_init = "run", True
                 if verdict == "wait":
                     why = prov.error if (prov and prov.error) else (_unavail_reason(prov)[1] if prov else "unavailable")
+                    if max_rounds is not None:
+                        log(f"bounded loop: quota hard-blocked ({why}); no round launched")
+                        report_runtime("waiting-quota", detail=why, next_action_at=None)
+                        return EX_NOPROGRESS
                     # Honor the endpoint's Retry-After, else wait until the blocking window is next
                     # eligible (capped), else poll. Never sooner than POLL, so we don't re-trip a 429.
                     nap = max(POLL, int(prov.retry_after) if (prov and prov.retry_after) else 0)
@@ -173,10 +192,24 @@ def cmd_loop(
                     log(f"quota: {agent} over-pace; --ignore-quota set — running anyway")
                 model = agent
             else:
-                model, snap = choose_model(cfg, agent, quota_cmd, refresh=True, renew=True)
+                if max_rounds is not None and quota_cmd:
+                    try:
+                        model, snap = choose_model(
+                            cfg, agent, quota_cmd, refresh=True, renew=True, command_timeout=ROUND_TIMEOUT
+                        )
+                    except subprocess.TimeoutExpired:
+                        log(f"bounded loop: quota command timed out after {ROUND_TIMEOUT}s; no round launched")
+                        return EX_NOPROGRESS
+                else:
+                    model, snap = choose_model(cfg, agent, quota_cmd, refresh=True, renew=True)
                 if model is None and claude_pending_init(snap):
                     model, pending_init = "claude", True
                 if model is None:
+                    if max_rounds is not None:
+                        waiting = _wait_quota_line(snap, markup=False)
+                        log(f"bounded loop: quota unavailable ({waiting}); no round launched")
+                        report_runtime("waiting-quota", detail=waiting, next_action_at=None)
+                        return EX_NOPROGRESS
                     # Honor a provider's Retry-After (e.g. a 429 asking for 580s) over the fixed poll, so
                     # we don't re-trip a rate limit by polling sooner than the server asked.
                     nap = max(POLL, max((p.retry_after or 0 for p in snap.values()), default=0))
@@ -205,8 +238,17 @@ def cmd_loop(
             # until the later of their resets. The rate_limit probe is itself exempt, so this is free
             # when we are flush.
             gb = github_budget()
+            if gb is None and max_rounds is not None:
+                log("bounded loop: GitHub budget unavailable; no round launched")
+                report_runtime("waiting-github", detail="GitHub budget unavailable", next_action_at=None)
+                return EX_NOPROGRESS
             low = {k: v for k, v in (gb or {}).items() if v[0] < GH_MIN_BUDGET}
             if low:
+                if max_rounds is not None:
+                    detail = ", ".join(f"{k}={gb[k][0]}" for k in low)
+                    log(f"bounded loop: GitHub budget low ({detail}); no round launched")
+                    report_runtime("waiting-github", detail=detail, next_action_at=None)
+                    return EX_NOPROGRESS
                 reset = max(v[1] for v in low.values())
                 nap = max(POLL, min(reset - int(time.time()) + 5, 3600))
                 detail = ", ".join(f"{k}={gb[k][0]}" for k in low)
@@ -266,7 +308,11 @@ def cmd_loop(
             if source is not None:
                 tail += ["--source", source]
             report_runtime("surveying", detail="selecting the next work unit", next_action_at=None)
+            rounds += 1
             rc = run_round_subprocess(tail)
+            if max_rounds is not None and rounds >= max_rounds:
+                log(f"bounded loop: completed {rounds}/{max_rounds} round dispatches; exiting rc={rc}")
+                return rc
 
             # 3) Settle: productive → short pause; no-progress/timeout/error → escalating back-off.
             if rc == 0:
@@ -326,7 +372,13 @@ def _ignore_quota_verdict(chosen: str | None, prov: Provider | None) -> str:
 
 
 def choose_model(
-    cfg: Config, agent: str, quota_cmd: str | None, *, refresh: bool = False, renew: bool = False
+    cfg: Config,
+    agent: str,
+    quota_cmd: str | None,
+    *,
+    refresh: bool = False,
+    renew: bool = False,
+    command_timeout: float | None = None,
 ) -> tuple[str | None, dict]:
     """Decide which model to run now. With --quota-cmd / TAUCETI_QUOTA_CMD set, consult that external
     command instead of the built-in pacer (the escape hatch for e.g. a multi-account scheme): run
@@ -341,7 +393,7 @@ def choose_model(
     if quota_cmd:
         import shlex
 
-        r = subprocess.run(shlex.split(quota_cmd) + [agent], capture_output=True, text=True)
+        r = subprocess.run(shlex.split(quota_cmd) + [agent], capture_output=True, text=True, timeout=command_timeout)
         out = (r.stdout or "").split()
         model = out[0] if (r.returncode == 0 and out) else None
         return (model or None), {"quota-cmd": Provider("quota-cmd", bool(model), model)}

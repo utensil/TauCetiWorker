@@ -43,7 +43,7 @@ Once you have settled on a target, derive a short stable id for it and claim it 
 - Code goes under `TauCeti/`. Just create your new module there. Place it in the topic's subdirectory: if `Foo/` exists, your file is `Foo/Bar.lean`. Two files sharing a CamelCase prefix should be a directory: the moment the tree would hold both `Foo.lean` and `FooBar.lean` (or two `Foo*.lean` files), move as you add, in this same PR: create `Foo/`, `git mv Foo.lean Foo/Basic.lean` (`Foo/Defs.lean` if it is definitions-only) and each existing `FooBar.lean` to `Foo/Bar.lean` (only imports and module headers change, no declaration renames; old->new module table in the PR body), and place your new file there. Never leave two flat `Foo*.lean` siblings behind. (Open PRs importing the old module names just rebase after yours merges; that is not a reason to stay flat.) Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds and axiom-audits every module under `TauCeti/` without it being listed — hand-edits to the root only cause needless conflicts. Do NOT touch `Scripts/`, `.github/`, the lakefile (`lakefile.toml`/`lakefile.lean`), or the Lake pins (`lake-manifest.json`/`lean-toolchain`) — the lakefile is human-owned, and forward Mathlib/toolchain bumps are a separate dedicated flow; keep this PR to `TauCeti/`.
 - Everything under `namespace TauCeti`. Classic `import Mathlib...` syntax is simplest.
 - **Never write to the roadmaps.** Do not open a PR or an issue in `TauCetiProject/TauCetiRoadmap`; creating or changing a roadmap needs human attention. If the step you want is not on a roadmap, pick a different target or stop without a PR, and say so in your report.
-- Aim for ~200–600 lines of genuine, non-vacuous content. A shorter PR that closes a milestone beats a longer peripheral one, and smaller-but-green beats bigger-but-broken. No tautologies, no `True`-placeholder fields, no vacuous definitions. Follow Mathlib naming/docstring conventions, and never silence a linter or use `set_option`.
+- Choose the smallest complete contribution to the named milestone; do not target a line count. No tautologies, no `True`-placeholder fields, no vacuous definitions. Follow Mathlib naming/docstring conventions, and never silence a linter or use `set_option`.
 - Must build green AND pass the axiom audit (allowlist: `propext`, `Classical.choice`, `Quot.sound`; no `sorry`/`native_decide`/new axioms/`maxHeartbeats`).
 
 ## Review your own diff, before you verify
@@ -52,14 +52,22 @@ your own change now, while you still have the context and a fix is free.
 
 You have not created a branch or committed yet, so your work is uncommitted and new files are
 untracked: `git status --short` lists them and `git diff` shows changes to files that already
-existed. Read what you actually wrote, as an adversarial reviewer would, against these three
-from `__RUBRICS__` — the angles that most often send a PR back:
+existed. Read what you actually wrote, as an adversarial reviewer would, against the rubrics in
+`__RUBRICS__`, including:
+
+- **`correctness` and `scope`** — does the statement express the named mathematical object
+  and the exact milestone contribution, beyond merely compiling? Check a concrete nontrivial
+  semantic witness and a boundary or degenerate case. For encodings, quotients, equivalences, and
+  relabelling maps, check the claimed invariants and compatibility with the intended operations;
+  look for unintended collapses or missing data. State what is proved and what remains.
 - **`api-design`** — is the public surface minimal, complete, and named the way the
   neighbouring API is? Any accidental export, missing `simp` lemma, or half-stated
   characterisation?
 - **`reuse`** — `grep` the pinned Mathlib and `TauCeti/` again for each declaration you added.
   Something you wrote from scratch that already exists, under a different name or in an import
-  you did not expect, is the most common finding of all.
+  you did not expect, is the most common finding of all. Also search for structural reuse:
+  existing abstractions, constructions, and reusable proof infrastructure may replace a custom
+  representation even when no declaration has the same name. Explain any needed specialization.
 - **`generality`** — is any hypothesis stronger than the proof actually uses, and is any
   statement proved at a level a caller cannot instantiate?
 
@@ -76,7 +84,17 @@ lake exe axioms
 If `lake build` is red, FIX IT or retreat (below). Never push red.
 
 
-**Do this synchronously, in this one turn.** Run the three commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). Pushing is the only thing that preserves your work.
+Run each command once and wait for its result before starting the next. If the tool returns a
+running session or process handle, keep waiting on that same handle (for example with `write_stdin`)
+until it exits; a yielded tool call is not a failed build. Never launch a duplicate cache or build
+command while the original may still be running. If a handle disappears, inspect the original
+process and its output; confirm it has exited before restarting. If you cannot establish its state,
+stop and report the uncertainty instead of starting another build.
+
+Stay with the round until verification and submission finish, or a concrete blocker requires a
+stop. Do not leave an unattended build behind. If blocked, retain the local changes and report the
+exact verification and publication state; a local commit or the worker's recovery checkpoint can
+preserve unfinished work. Never publish unverified code merely to preserve it.
 
 ## If the target won't close
 Never downgrade to a lookalike: a weakened statement, a degenerate special case, or scaffolding carrying the result's name. Retreat one rung at a time:

@@ -54,12 +54,17 @@ bash scripts/lint-env.sh
 Iterate until every one is green. A green `lake build` alone is NOT enough — the `build` check also
 fails on an axiom-audit, module-system, or lint-env violation (e.g. a missing docstring). Never push red.
 
-Run each command synchronously in a single foreground shell invocation with a generous timeout. Do
-not use the interactive `write_stdin`/session-polling tool for a long-running cache, build, or audit
-command: its transient process handle can disappear before the result is returned. If a tool call
-yields a session id anyway, rerun the command with a longer foreground timeout rather than polling it.
+Run each command once and wait for its result before starting the next. If the tool returns a
+running session or process handle, keep waiting on that same handle (for example with `write_stdin`)
+until it exits; a yielded tool call is not a failed build. Never launch a duplicate cache or build
+command while the original may still be running. If a handle disappears, inspect the original
+process and its output; confirm it has exited before restarting. If you cannot establish its state,
+stop and report the uncertainty instead of starting another build.
 
-**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
+Stay with the round until verification and submission finish, or a concrete blocker requires a
+stop. Do not leave an unattended build behind. If blocked, retain the local changes and report the
+exact verification and publication state; a local commit or the worker's recovery checkpoint can
+preserve unfinished work. Never publish unverified code merely to preserve it.
 
 ## Submit
 - Commit the fix with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.

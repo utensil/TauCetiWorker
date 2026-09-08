@@ -181,6 +181,14 @@ def add_work_flags(p: argparse.ArgumentParser) -> None:
         help="run the driver: keep doing rounds (pacing against quota between them) "
         "instead of the default single round",
     )
+    p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        metavar="N",
+        help="with --loop, dispatch at most N rounds and exit with the last round's status; "
+        "N must be positive; a blocked preflight exits without waiting",
+    )
     add_review_scope_flags(p)
     p.add_argument(
         "--only",
@@ -799,6 +807,12 @@ def cmd_status(args) -> int:
 
 
 def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
+    max_rounds = getattr(args, "max_rounds", None)
+    if max_rounds is not None:
+        if max_rounds <= 0:
+            raise Die("--max-rounds must be a positive integer")
+        if not getattr(args, "loop", False) or one_round:
+            raise Die("--max-rounds requires work --loop")
     # --host used to opt OUT of the bubble sandbox; running on the host is now the default, so the flag
     # is a no-op we only warn about. --bubble is the way to opt back INTO the sandbox.
     if getattr(args, "host", False):

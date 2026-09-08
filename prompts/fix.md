@@ -6,6 +6,11 @@ Quote every complete URL passed to `gh api` (for example `gh api 'repos/OWNER/RE
 - The review is posted as a sticky scoreboard comment plus one thread per flagged rubric. Read them:
   - `gh pr view __PR__ --repo TauCetiProject/TauCeti --json comments`
   - `gh api "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments?per_page=100"` (the per-rubric review threads; each root carries a `<!--tauceti-rubric:NAME-->` marker, and the finding text + suggested fix). Keep the complete URL quoted; in zsh an unquoted `?` is a filename glob.
+- Match the latest scoreboard to the current PR head and read unresolved findings from earlier
+  scoreboards and their replies as well. For each unresolved finding, determine whether the current
+  change fixes it, prior evidence already resolves it, or it remains blocked; do not treat a newer
+  narrow review as erasing earlier blockers. If review history is incomplete or the scoreboard is
+  stale, report the missing evidence rather than claiming all-clear.
 - The blocking rubrics are the ones marked ⛔ (block) or 🟡 (changes requested) on the scoreboard. The other rubrics are already ✅ approved — note which ones.
 
 ## Do not regress what is already green
@@ -20,12 +25,21 @@ For each finding, judge whether it is actually correct:
 - **If it is wrong**, do NOT comply. Reply on that rubric's thread explaining why, with evidence (a synth-check, a Mathlib citation, a build error). Post the reply to the thread root:
   `gh api -X POST "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies" -f body="..."`
   (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.)
+  Read prior contests and the reviewer's disposition first. Never repeat an identical rejected
+  contest on an unchanged head: provide materially new evidence or stop with the unresolved blocker.
 
 ## Rules of the repo (hard constraints)
 - Code goes under `TauCeti/`. Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds every module under `TauCeti/`, so there is no need to touch it (if a reviewer claims your API is not reachable from the root, the glob already covers it). Do NOT touch `Scripts/`, `.github/`, the lakefile (`lakefile.toml`/`lakefile.lean`), or the Lake pins (`lake-manifest.json`/`lean-toolchain`) — the lakefile is human-owned, and forward Mathlib/toolchain bumps are a separate dedicated flow; keep this PR to `TauCeti/`.
 - Everything under `namespace TauCeti`.
 - **Never write to the roadmaps.** Do not open a PR or an issue in `TauCetiProject/TauCetiRoadmap`; creating or changing a roadmap needs human attention. If a finding means the PR's target is not on any roadmap, say so in your report and stop.
 - Must stay green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and **never silence a linter** (e.g. with `set_option ... false`) to force a change through — that is itself a reason to push back on the finding.
+
+Before verifying, audit the actual diff against **correctness, scope, and reuse**, as well as the
+approved rubrics above. A green build does not establish that an encoding or statement has the
+intended meaning: check a concrete nontrivial semantic witness and a boundary case, including
+invariants and operation compatibility for relabelling or quotient constructions. Search pinned
+Mathlib and `TauCeti/` for reusable abstractions and proof infrastructure, not just matching lemma
+names. If a required redesign exceeds this PR's target, stop and explain the scope conflict.
 
 ## Verify before pushing (all three MUST pass)
 ```
@@ -35,12 +49,17 @@ lake exe axioms
 ```
 Iterate until green. Never push red.
 
-Run each command synchronously in a single foreground shell invocation with a generous timeout. Do
-not use the interactive `write_stdin`/session-polling tool for a long-running cache or build command:
-its transient process handle can disappear before the result is returned. If a tool call yields a
-session id anyway, rerun the command with a longer foreground timeout rather than polling that id.
+Run each command once and wait for its result before starting the next. If the tool returns a
+running session or process handle, keep waiting on that same handle (for example with `write_stdin`)
+until it exits; a yielded tool call is not a failed build. Never launch a duplicate cache or build
+command while the original may still be running. If a handle disappears, inspect the original
+process and its output; confirm it has exited before restarting. If you cannot establish its state,
+stop and report the uncertainty instead of starting another build.
 
-**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
+Stay with the round until verification and submission finish, or a concrete blocker requires a
+stop. Do not leave an unattended build behind. If blocked, retain the local changes and report the
+exact verification and publication state; a local commit or the worker's recovery checkpoint can
+preserve unfinished work. Never publish unverified code merely to preserve it.
 
 ## Submit
 - Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
