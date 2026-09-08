@@ -107,7 +107,9 @@ def spawn_round(argv_tail: list[str]) -> subprocess.Popen:
     the current interpreter directly on this file (NOT via the uv shebang) to avoid a uv wrapper
     process between the loop and the round — sys.executable is already the uv-resolved interpreter."""
     cmd = self_argv("_round", *argv_tail)
-    return subprocess.Popen(cmd, start_new_session=True, env=self_env())
+    env = self_env()
+    env["TAUCETI_NATIVE_ROUND_PARENT"] = str(os.getpid())
+    return subprocess.Popen(cmd, start_new_session=True, env=env)
 
 
 def signal_group(pgid: int, sig: int) -> str:

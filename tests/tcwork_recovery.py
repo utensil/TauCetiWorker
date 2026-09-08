@@ -3,6 +3,7 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -331,6 +332,7 @@ class RecoveryTests(unittest.TestCase):
             return subprocess.Popen(
                 [sys.executable, "-c", child],
                 start_new_session=True,
+                env={**os.environ, "TAUCETI_NATIVE_ROUND_PARENT": str(os.getpid())},
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -360,6 +362,191 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(NoProgress):
                 w._restore_resume(self.worker, self.c, self.pr)
         self.assertTrue(w._resume_paths(self.worker, self.c)[0].exists())
+
+    def test_capture_interruptions_restore_bytes_and_keep_older_generations(self):
+        prior_refs = {}
+        for boundary in ("stash", "stash_ref", "metadata", "alias"):
+            with self.subTest(boundary=boundary):
+                staged = f"staged {boundary}\0\n".encode()
+                worktree = f"unstaged {boundary}\0\n".encode()
+                untracked = f"new {boundary}\0\n".encode()
+                (self.co / "source").write_bytes(staged)
+                self.git("add", "source")
+                (self.co / "source").write_bytes(worktree)
+                (self.co / "new-source").write_bytes(untracked)
+                active = w._active_resume_path(self.worker)
+                w._write_resume_meta(active, {"pr": 999, "public_head": self.base, "stage": "fix"})
+                original_git, original_meta = w._resume_git, w._write_resume_meta
+
+                def interrupt_git(worker, *args, original_git=original_git, boundary=boundary, **kwargs):
+                    result = original_git(worker, *args, **kwargs)
+                    if (
+                        (boundary == "stash" and args[:2] == ("stash", "push"))
+                        or (boundary == "stash_ref" and args[0] == "update-ref" and args[1].endswith("/stash_ref"))
+                        or (boundary == "alias" and args[:2] == ("update-ref", w._resume_paths(self.worker, self.c)[1]))
+                    ):
+                        raise KeyboardInterrupt("injected crash after durable Git mutation")
+                    return result
+
+                def interrupt_meta(path, data, original_meta=original_meta, boundary=boundary):
+                    original_meta(path, data)
+                    if boundary == "metadata" and path == w._resume_paths(self.worker, self.c)[0]:
+                        raise KeyboardInterrupt("injected crash after metadata replacement")
+
+                with (
+                    patch.object(w, "_resume_git", side_effect=interrupt_git),
+                    patch.object(w, "_write_resume_meta", side_effect=interrupt_meta),
+                ):
+                    with self.assertRaises(KeyboardInterrupt):
+                        w._checkpoint_resume(self.worker, self.c, "fix")
+                self.assertTrue(w._capture_intent_path(self.worker).exists())
+                self.assertTrue(active.exists())
+                self.assertFalse(a._checkout_preserved(self.cfg))
+                w._recover_active_checkout(self.worker)
+                self.assertFalse(active.exists())
+                self.assertFalse(w._capture_intent_path(self.worker).exists())
+                self.assertTrue(w._restore_resume(self.worker, self.c, self.pr))
+                self.assertEqual(
+                    RUN(["git", "-C", str(self.co), "show", ":source"], capture_output=True).stdout, staged
+                )
+                self.assertEqual((self.co / "source").read_bytes(), worktree)
+                self.assertEqual((self.co / "new-source").read_bytes(), untracked)
+                for ref, oid in prior_refs.items():
+                    self.assertEqual(self.git("rev-parse", ref), oid)
+                meta = json.loads(w._resume_paths(self.worker, self.c)[0].read_text())
+                prior_refs.update(
+                    {meta[field]: self.git("rev-parse", meta[field]) for field in ("commit_ref", "stash_ref")}
+                )
+
+    def test_interrupted_capture_never_adopts_unrelated_stash(self):
+        (self.co / "source").write_text("unassociated work\n")
+        active = w._active_resume_path(self.worker)
+        w._write_resume_meta(active, {"pr": 999, "public_head": self.base, "stage": "fix"})
+        original = w._resume_git
+
+        def before_stash(worker, *args, **kwargs):
+            if args[:2] == ("stash", "push"):
+                raise KeyboardInterrupt("interrupted before stash")
+            return original(worker, *args, **kwargs)
+
+        with patch.object(w, "_resume_git", side_effect=before_stash), self.assertRaises(KeyboardInterrupt):
+            w._checkpoint_resume(self.worker, self.c, "fix")
+        self.git("stash", "push", "-qm", "unrelated stash")
+        with self.assertRaises(NoProgress):
+            w._recover_active_checkout(self.worker)
+        self.assertTrue(active.exists())
+        self.assertTrue(w._capture_intent_path(self.worker).exists())
+        with self.assertRaises(NoProgress):
+            w._restore_resume(self.worker, self.c, self.pr)
+        self.assertFalse(a._checkout_preserved(self.cfg))
+
+    def test_incomplete_direct_author_launch_blocks_recovery(self):
+        active = w._active_resume_path(self.worker)
+        w._write_resume_meta(
+            active,
+            {
+                "pr": 999,
+                "public_head": self.base,
+                "stage": "fix",
+                "author_scope_pending": True,
+            },
+        )
+        with self.assertRaises(NoProgress):
+            w._recover_active_checkout(self.worker)
+        self.assertTrue(active.exists())
+
+    def test_unreadable_process_inventory_never_certifies_quiescence(self):
+        for output in ("", "not-a-process\n", "1 S\n"):
+            with (
+                self.subTest(output=output),
+                patch.object(a.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")),
+                self.assertRaises(NoProgress),
+            ):
+                a._author_groups(999999)
+
+    def test_regrouped_writer_quiesces_before_return_in_direct_and_native_modes(self):
+        from tauceti_worker import round as rnd
+
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(lambda: unrelated.poll() is None and unrelated.kill())
+        self.addCleanup(lambda: unrelated.poll() is None and unrelated.terminate())
+        for native in (False, True):
+            with self.subTest(native=native):
+                ready = self.co / f"ready-{native}"
+                late = self.co / f"late-{native}"
+                result = self.co / f"result-{native}"
+                child = (
+                    "import os,time; from pathlib import Path; os.setpgrp(); "
+                    f"Path({str(ready)!r}).write_text(str(os.getpid())); "
+                    f"time.sleep(2); Path({str(late)!r}).write_text('late write'); time.sleep(60)"
+                )
+                author = (
+                    "import subprocess,sys,time; from pathlib import Path; "
+                    f"subprocess.Popen([sys.executable,'-c',{child!r}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                    f"\nwhile not Path({str(ready)!r}).exists(): time.sleep(.01)"
+                )
+                caller = (
+                    "import os,sys; from pathlib import Path; from tauceti_worker.agents import run_agent_proc,agent_quiescent; "
+                    f"rc=run_agent_proc([sys.executable,'-c',{author!r}],env=dict(os.environ),"
+                    f"logdir=Path({str(self.cfg.logdir)!r}),label='synthetic',provider='codex'); "
+                    f"Path({str(result)!r}).write_text(str((rc,agent_quiescent())))"
+                )
+                env = dict(os.environ)
+                if native:
+                    env["TAUCETI_NATIVE_ROUND_PARENT"] = str(os.getpid())
+                proc = subprocess.Popen([sys.executable, "-c", caller], start_new_session=native, env=env)
+                self.assertEqual(proc.wait(timeout=10), 0)
+                self.assertEqual(result.read_text(), "(0, True)")
+                pid = int(ready.read_text())
+                status = RUN(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+                self.assertTrue(status.returncode or status.stdout.strip().startswith("Z"))
+                self.assertFalse(late.exists())
+                self.assertIsNone(unrelated.poll())
+                if native:
+                    self.assertFalse(rnd._session_groups(proc.pid))
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
+
+    def test_native_sigkill_reaps_regrouped_writer_before_recovery(self):
+        from tauceti_worker import round as rnd
+
+        active = w._active_resume_path(self.worker)
+        ready = self.co / "ready"
+        w._write_resume_meta(active, {"pr": 999, "public_head": self.base, "stage": "fix"})
+        writer = (
+            "import os,time; from pathlib import Path; os.setpgrp(); "
+            f"Path({str(self.co / 'source')!r}).write_text('hard-killed edit\\n'); "
+            f"Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
+        )
+        author = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{writer!r}]); time.sleep(60)"
+        caller = (
+            "import os,sys,time,signal,threading; from pathlib import Path; "
+            "from tauceti_worker.agents import run_agent_proc; "
+            "\ndef crash():\n"
+            f" while not Path({str(ready)!r}).exists(): time.sleep(.01)\n"
+            " os.kill(os.getpid(),signal.SIGKILL)\n"
+            "threading.Thread(target=crash,daemon=True).start()\n"
+            f"run_agent_proc([sys.executable,'-c',{author!r}],env=dict(os.environ),"
+            f"logdir=Path({str(self.cfg.logdir)!r}),label='synthetic',provider='codex')"
+        )
+
+        def spawn(_):
+            return subprocess.Popen(
+                [sys.executable, "-c", caller],
+                start_new_session=True,
+                env={
+                    **os.environ,
+                    "TAUCETI_NATIVE_ROUND_PARENT": str(os.getpid()),
+                    "TAUCETI_ACTIVE_CHECKOUT": str(active),
+                },
+            )
+
+        with patch.object(rnd, "spawn_round", side_effect=spawn):
+            self.assertEqual(rnd.run_round_subprocess([], timeout=10), -signal.SIGKILL)
+        w._recover_active_checkout(self.worker)
+        self.assertFalse(active.exists())
+        self.assertTrue(w._restore_resume(self.worker, self.c, self.pr))
+        self.assertEqual((self.co / "source").read_text(), "hard-killed edit\n")
 
     def test_prior_pr_checkpoint_not_overwritten_on_switch(self):
         candidate = self.candidate()

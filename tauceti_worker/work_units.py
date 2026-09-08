@@ -13,11 +13,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agents import (
     AuthoringProfile,
+    _author_groups,
     _codex_review_effort_override,
     _codex_review_model_override,
     _kiro_review_model,
@@ -824,51 +826,104 @@ def _active_resume_path(w: Worker) -> Path:
     return w.cfg.state / "resume" / "active-checkout.json"
 
 
-def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
-    """Capture every changed candidate, independently of provider refund classification.
+def _capture_intent_path(w: Worker) -> Path:
+    return w.cfg.state / "resume" / "capture-intent.json"
 
-    All Git operations are checked. Failure is a hard preparation gate, never success-shaped
-    metadata. Older generations remain reachable when a resumed author changes its candidate.
-    """
+
+def _finish_capture(w: Worker, intent: dict) -> None:
+    """Reconcile a write-ahead capture by its unique stash message, never the generic stash tip."""
+    c = Candidate(int(intent["pr"]), str(intent["public_head"]), "interrupted capture")
+    meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+    head = str(intent["candidate_head"])
+    if _resume_git(w, "rev-parse", "HEAD") != head:
+        raise NoProgress("candidate capture HEAD changed; transaction retained for reconciliation")
+    generation = str(intent["generation"])
+    candidate_ref = f"refs/tauceti-resume-history/{c.pr}/{generation}/commit_ref"
+    candidate_stash_ref = f"refs/tauceti-resume-history/{c.pr}/{generation}/stash_ref"
+    for ref_kind, oid in intent.get("previous_refs", {}).items():
+        _resume_git(w, "update-ref", f"refs/tauceti-resume-history/{c.pr}/{generation}/previous_{ref_kind}", oid)
+    _resume_git(w, "update-ref", candidate_ref, head)
+    stash = None
+    if intent["dirty"]:
+        message = f"tauceti-resume {c.pr} capture {generation}"
+        entries = _resume_git(w, "stash", "list", "--format=%H%x00%gs").splitlines()
+        matches = [line.split("\0", 1)[0] for line in entries if line.endswith(": " + message)]
+        if len(matches) != 1:
+            # The stash may not have started, may be partial, or may have disappeared. Neither
+            # clean HEAD nor an unrelated stash proves capture; preserve intent and stop.
+            raise NoProgress("candidate stash transaction is incomplete or ambiguous; preparation blocked")
+        stash = matches[0]
+        if _resume_git(w, "rev-parse", stash + "^1") != head:
+            raise NoProgress("candidate stash base changed; transaction retained")
+        _resume_git(w, "update-ref", candidate_stash_ref, stash)
+    if _resume_git(w, "status", "--porcelain", "--untracked-files=all"):
+        raise NoProgress("candidate preservation: checkout changed during capture; preparation blocked")
+    # Immutable generation refs keep the old metadata valid until this atomic replacement.
+    _write_resume_meta(
+        meta_path,
+        {
+            "pr": c.pr,
+            "public_head": c.head,
+            "candidate_head": head,
+            "commit_ref": candidate_ref,
+            "stash_ref": candidate_stash_ref if stash else None,
+            "stage": intent["stage"],
+            "created_at": intent["created_at"],
+        },
+    )
+    # Retain compatibility aliases; restoration and previous generations use immutable refs.
+    _resume_git(w, "update-ref", commit_ref, head)
+    if stash:
+        _resume_git(w, "update-ref", stash_ref, stash)
+    _capture_intent_path(w).unlink()
+    log(f"  {intent['stage']} #{c.pr}: preserved local candidate @{head[:12]}")
+
+
+def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
+    """Journal intent before stash can clean the checkout; every incomplete capture fails closed."""
     try:
+        intent_path = _capture_intent_path(w)
+        if intent_path.exists():
+            intent = json.loads(intent_path.read_text(encoding="utf-8"))
+            if intent["pr"] != c.pr or intent["public_head"] != c.head:
+                raise NoProgress("another candidate capture is pending; preparation blocked")
+            _finish_capture(w, intent)
+            return
         head = _resume_git(w, "rev-parse", "HEAD")
         dirty = bool(_resume_git(w, "status", "--porcelain", "--untracked-files=all"))
         if head == c.head and not dirty:
             return
-        meta_path, commit_ref, stash_ref = _resume_paths(w, c)
+        previous_refs = {}
+        meta_path = _resume_paths(w, c)[0]
         if meta_path.exists():
             old = json.loads(meta_path.read_text(encoding="utf-8"))
-            generation = str(time.time_ns())
             for field in ("commit_ref", "stash_ref"):
-                ref = old.get(field)
-                if ref:
-                    oid = _resume_git(w, "rev-parse", str(ref))
-                    archive = f"refs/tauceti-resume-history/{c.pr}/{generation}/{field}"
-                    _resume_git(w, "update-ref", archive, oid)
-        _resume_git(w, "update-ref", commit_ref, head)
-        stash = None
+                if old.get(field):
+                    previous_refs[field] = _resume_git(w, "rev-parse", str(old[field]))
+        intent = {
+            "previous_refs": previous_refs,
+            "pr": c.pr,
+            "public_head": c.head,
+            "candidate_head": head,
+            "generation": uuid.uuid4().hex,
+            "dirty": dirty,
+            "stage": label,
+            "created_at": int(time.time()),
+        }
+        _write_resume_meta(intent_path, intent)
         if dirty:
             _resume_git(
-                w, "stash", "push", "--include-untracked", "--quiet", "-m", f"tauceti-resume {c.pr}", timeout=120
+                w,
+                "stash",
+                "push",
+                "--include-untracked",
+                "--quiet",
+                "-m",
+                f"tauceti-resume {c.pr} capture {intent['generation']}",
+                timeout=120,
             )
-            stash = _resume_git(w, "rev-parse", "refs/stash")
-            _resume_git(w, "update-ref", stash_ref, stash)
-            if _resume_git(w, "status", "--porcelain", "--untracked-files=all"):
-                raise NoProgress("candidate preservation: checkout changed during stash; preparation blocked")
-        _write_resume_meta(
-            meta_path,
-            {
-                "pr": c.pr,
-                "public_head": c.head,
-                "candidate_head": head,
-                "commit_ref": commit_ref,
-                "stash_ref": stash_ref if stash else None,
-                "stage": label,
-                "created_at": int(time.time()),
-            },
-        )
-        log(f"  {label} #{c.pr}: preserved local candidate @{head[:12]}")
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        _finish_capture(w, intent)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
         raise NoProgress("candidate preservation failed; checkout must be recovered before preparation") from exc
 
 
@@ -876,11 +931,19 @@ def _recover_active_checkout(w: Worker) -> None:
     """Finish preservation of the previous PR after a killed/timed-out round, before any switch."""
     path = _active_resume_path(w)
     if not path.exists():
+        if _capture_intent_path(w).exists():
+            raise NoProgress("candidate capture lacks active association; preparation blocked")
         return
     try:
         meta = json.loads(path.read_text(encoding="utf-8"))
+        if meta.get("author_scope_pending"):
+            raise NoProgress("prior author launch scope is uncertain; capture and preparation blocked")
+        sid = meta.get("author_sid")
         pgid = meta.get("author_pgid")
-        if pgid:
+        if sid:
+            if _author_groups(int(sid), meta.get("author_excluded_pgid")):
+                raise NoProgress("prior author session still has writers; capture and preparation blocked")
+        elif pgid:
             try:
                 os.killpg(int(pgid), 0)
             except ProcessLookupError:
@@ -898,6 +961,8 @@ def _recover_active_checkout(w: Worker) -> None:
 
 def _restore_resume(w: Worker, c: Candidate, p) -> bool:
     """Restore an exact-head checkpoint; failures stop before any destructive fallback checkout."""
+    if _capture_intent_path(w).exists():
+        raise NoProgress("candidate capture transaction pending; restore and preparation blocked")
     meta_path, commit_ref, _ = _resume_paths(w, c)
     if not meta_path.is_file():
         # A remote move does not authorize replacing a pending candidate from an older head.
@@ -929,6 +994,8 @@ def _clear_resume(w: Worker, c: Candidate) -> None:
     contests, unknown queries and normal process exit are insufficient publication evidence.
     """
     try:
+        if _capture_intent_path(w).exists():
+            return
         head = _resume_git(w, "rev-parse", "HEAD")
         if head == c.head or _resume_git(w, "status", "--porcelain", "--untracked-files=all"):
             return
@@ -1039,7 +1106,7 @@ def _do_fixlike(
         resumed = _restore_resume(w, c, p)
         if not resumed:
             chk = subprocess.run(
-                ["gh", "pr", "checkout", str(pr), "--force"], cwd=str(co), capture_output=True, text=True
+                ["gh", "pr", "checkout", str(pr), "--force"], cwd=str(co), capture_output=True, text=True, timeout=120
             )
             if chk.returncode:
                 detail = ((chk.stderr or "") + (chk.stdout or "")).strip()[-200:]

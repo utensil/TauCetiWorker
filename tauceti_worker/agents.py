@@ -485,7 +485,9 @@ def _checkout_preserved(cfg: Config) -> bool:
             log("checkout: dirty or unreadable state; preservation required before preparation")
             return False
         state = getattr(cfg, "state", None)
-        if state and (state / "resume" / "active-checkout.json").exists():
+        if state and any(
+            (state / "resume" / name).exists() for name in ("active-checkout.json", "capture-intent.json")
+        ):
             log("checkout: interrupted author metadata requires recovery before preparation")
             return False
         refs = git(
@@ -765,39 +767,38 @@ def agent_quiescent() -> bool:
     return _AGENT_QUIESCENT
 
 
-def _stop_agent_group(proc) -> None:
-    """Quiesce the agent's own group before any checkout checkpoint is captured."""
+def _author_groups(session_id: int, excluded_group: int | None = None) -> set[int]:
+    from .round import _session_groups
+
+    try:
+        groups = _session_groups(session_id)
+    except Die as exc:
+        raise NoProgress("author process status unreadable; candidate capture blocked") from exc
+    return groups - {excluded_group}
+
+
+def _stop_agent_group(proc, session_id: int | None = None, excluded_group: int | None = None) -> None:
+    """Quiesce every author group, including descendants that changed their process group."""
     if not hasattr(proc, "pid"):  # simple transcript test doubles have no OS process
         proc.wait()
         return
+    session_id = proc.pid if session_id is None else session_id
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            pass
-        except PermissionError as exc:
-            raise NoProgress("author process group could not be stopped; candidate capture blocked") from exc
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            continue
-        for _ in range(20):
-            ps = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, timeout=10)
-            if ps.returncode:
-                raise NoProgress("author process status unreadable; candidate capture blocked")
-            live = False
-            for line in ps.stdout.splitlines():
-                fields = line.split()
-                if len(fields) != 2 or fields[1].startswith("Z"):
-                    continue
+        deadline = time.monotonic() + 2
+        while True:
+            groups = _author_groups(session_id, excluded_group)
+            for group in groups:
                 try:
-                    if os.getpgid(int(fields[0])) == proc.pid:
-                        live = True
-                        break
+                    os.killpg(group, sig)
                 except ProcessLookupError:
-                    continue
-            if not live:
+                    pass
+                except PermissionError as exc:
+                    raise NoProgress("author process group could not be stopped; candidate capture blocked") from exc
+            if not groups:
+                proc.wait(timeout=2)
                 return
+            if time.monotonic() >= deadline:
+                break
             time.sleep(0.05)
     raise NoProgress("author descendants still running; candidate capture blocked")
 
@@ -851,6 +852,20 @@ def run_agent_proc(
         global _AGENT_QUIESCENT
         if not check_claim_health():
             return 75
+        # Only the native supervisor proves this session is dedicated to this round. Direct
+        # invocations instead give the author its own session, never sweeping a caller's shell.
+        native = os.environ.get("TAUCETI_NATIVE_ROUND_PARENT") == str(os.getppid()) and os.getsid(0) == os.getpid()
+        session_id = os.getsid(0) if native else None
+        excluded_group = os.getpgrp() if native else None
+        active_path = env.get("TAUCETI_ACTIVE_CHECKOUT")
+        path = Path(active_path) if active_path else None
+        meta = None
+        if path:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            meta.update(author_sid=session_id, author_excluded_pgid=excluded_group, author_scope_pending=not native)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
         proc = subprocess.Popen(
             argv,
             cwd=cwds,
@@ -861,9 +876,9 @@ def run_agent_proc(
             text=True,
             errors="replace",
             bufsize=1,
-            # Stay in the native round session for supervisor cleanup on hard kill, but own
-            # a group so normal completion/cancellation can stop writers before capture.
-            process_group=0,
+            # Native rounds retain their session so the outer hard-kill sweep remains complete.
+            process_group=0 if native else None,
+            start_new_session=not native,
         )
         _AGENT_QUIESCENT = False
         assert proc.stdout is not None
@@ -879,11 +894,10 @@ def run_agent_proc(
         reader = threading.Thread(target=read_lines, daemon=True)
         reader.start()
         try:
-            active_path = env.get("TAUCETI_ACTIVE_CHECKOUT")
-            if active_path and hasattr(proc, "pid"):
-                path = Path(active_path)
-                meta = json.loads(path.read_text(encoding="utf-8"))
-                meta["author_pgid"] = proc.pid
+            if not native and hasattr(proc, "pid"):
+                session_id = proc.pid
+            if path and hasattr(proc, "pid"):
+                meta.update(author_pgid=proc.pid, author_sid=session_id, author_scope_pending=False)
                 tmp = path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(meta) + "\n", encoding="utf-8")
                 os.replace(tmp, path)
@@ -915,7 +929,7 @@ def run_agent_proc(
                 write_rendered(destination, f"[warning] no structured {provider} events were recognized\n")
             return rc
         finally:
-            _stop_agent_group(proc)
+            _stop_agent_group(proc, session_id, excluded_group)
             _AGENT_QUIESCENT = True
             reader.join(timeout=2)
             proc.stdout.close()

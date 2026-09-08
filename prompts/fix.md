@@ -11,7 +11,7 @@ Quote every complete URL passed to `gh api` (for example `gh api 'repos/OWNER/RE
   change fixes it, prior evidence already resolves it, or it remains blocked; do not treat a newer
   narrow review as erasing earlier blockers. If review history is incomplete or the scoreboard is
   stale, report the missing evidence rather than claiming all-clear.
-- The blocking rubrics are the ones marked ⛔ (block) or 🟡 (changes requested) on the scoreboard. The other rubrics are already ✅ approved — note which ones.
+- The blocking rubrics are the ones marked ⛔ (block) or 🟡 (changes requested) on the scoreboard. Record approvals only where the exact-head authoritative review explicitly shows ✅; absent or unresolved historical rubrics remain unapproved.
 
 ## Do not regress what is already green
 The scoreboard shows several rubrics already approved (✅). A re-review re-runs the rubrics you touched, so a change that fixes one blocker but degrades an approved rubric will turn that rubric red and the PR will not converge — this is the single most common reason a nearly-done PR is eventually abandoned. So:
@@ -67,7 +67,7 @@ preserve unfinished work. Never publish unverified code merely to preserve it.
   ```
   "__BIN__/git-safe-push"
   ```
-  This compare-and-swaps the PR branch against the head you started from, so a concurrent agent's work is never silently clobbered. Do NOT run a raw `git push` (nor `git push --force` / `--force-with-lease`); the wrapper is the only sanctioned push. If it reports the branch moved or the lease was lost, another agent pushed — STOP and say so in your report (the next round re-syncs and retries); do not work around it. A successful push updates the PR; a re-review runs separately.
+  This compare-and-swaps the PR branch against the head you started from, so a concurrent agent's work is never silently clobbered. Do NOT run a raw `git push` (nor `git push --force` / `--force-with-lease`); the wrapper is the only sanctioned push. If it reports branch movement or lease uncertainty, STOP and report the exact diagnostic; lease loss alone does not establish that another agent pushed. Preserve local work for reconciliation and do not work around the refusal. A successful push updates the PR; a re-review runs separately.
 - Do NOT open a new PR; do NOT touch other files.
 
 ## Report
