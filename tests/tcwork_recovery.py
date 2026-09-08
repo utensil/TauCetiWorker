@@ -61,10 +61,14 @@ class RecoveryTests(unittest.TestCase):
         return self.git("rev-parse", "HEAD")
 
     def run_fix(self, agent):
+        def launch(*args, on_launch):
+            on_launch()
+            return agent(*args)
+
         with (
             patch.object(w, "prepare_checkout", return_value=True),
             patch.object(w, "_effective_authoring_profile", return_value=None),
-            patch.object(w, "run_agent_host", side_effect=agent),
+            patch.object(w, "run_agent_host", side_effect=launch),
         ):
             # Existing checkpoint avoids gh checkout; all agent behavior is synthetic.
             return w.do_fix(self.worker, self.sv, self.c, self.opts, False)
@@ -228,6 +232,183 @@ class RecoveryTests(unittest.TestCase):
         self.pr.head_owner = ""
         self.assertIsNone(w.do_fix_ci(self.worker, self.sv, self.c, self.opts, False))
         self.assertEqual(self.worker.counters.read("ci-pr-999"), 0)
+
+    def maintenance_cases(self):
+        return (
+            (w.do_fix, (f"fix-999-{self.base[:12]}",)),
+            (w.do_fix_ci, (f"ci-999-{self.base[:12]}", "ci-pr-999")),
+        )
+
+    def test_unresolved_prior_author_never_spends_selected_candidate(self):
+        active = w._active_resume_path(self.worker)
+        w._write_resume_meta(
+            active,
+            {"pr": 998, "public_head": "b" * 40, "stage": "fix", "author_scope_pending": True},
+        )
+        for run, keys in self.maintenance_cases():
+            with self.subTest(kind=run.__name__), patch.object(w, "run_agent_host") as author:
+                for _ in range(3):
+                    with self.assertRaises(NoProgress):
+                        run(self.worker, self.sv, self.c, self.opts, False)
+                author.assert_not_called()
+                self.assertTrue(active.exists())
+                self.assertEqual([self.worker.counters.read(key) for key in keys], [0] * len(keys))
+
+    def test_preparation_and_restore_failures_never_spend_attempts(self):
+        for run, keys in self.maintenance_cases():
+            for fault in ("prepare", "restore", "checkout", "prompt"):
+                with (
+                    self.subTest(kind=run.__name__, fault=fault),
+                    patch.object(w, "run_agent_host") as author,
+                    patch.object(w, "report_failure"),
+                    patch.object(w, "prepare_checkout", return_value=fault != "prepare"),
+                    patch.object(
+                        w,
+                        "_restore_resume",
+                        side_effect=NoProgress("restore failed") if fault == "restore" else None,
+                        return_value=False,
+                    ),
+                    patch.object(w, "fill_prompt", side_effect=OSError("prompt failed") if fault == "prompt" else None),
+                    patch.object(
+                        w.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "checkout failed")
+                    ),
+                ):
+                    if fault in ("restore", "prompt"):
+                        with self.assertRaises((NoProgress, OSError)):
+                            run(self.worker, self.sv, self.c, self.opts, False)
+                    else:
+                        self.assertEqual(run(self.worker, self.sv, self.c, self.opts, False), 1)
+                    author.assert_not_called()
+                    self.assertEqual([self.worker.counters.read(key) for key in keys], [0] * len(keys))
+
+    def test_claim_refusal_never_spends_either_maintenance_budget(self):
+        self.worker.claims.begin_branch_work = lambda *args: False
+        for run, keys in self.maintenance_cases():
+            with self.subTest(kind=run.__name__), patch.object(w, "run_agent_host") as author:
+                self.assertIsNone(run(self.worker, self.sv, self.c, self.opts, False))
+                author.assert_not_called()
+                self.assertEqual([self.worker.counters.read(key) for key in keys], [0] * len(keys))
+
+    def test_runner_setup_and_last_claim_refusal_do_not_debit_or_refund(self):
+        from tauceti_worker import round as rnd
+
+        for run, keys in self.maintenance_cases():
+            for fault in ("argv", "log", "claim"):
+                self.cfg.logdir = self.co.parent / f"logs-{run.__name__}-{fault}"
+                for key in keys:
+                    self.worker.counters.write(key, 2)  # a refusal must not refund an older attempt
+                with (
+                    self.subTest(kind=run.__name__, fault=fault),
+                    patch.object(w, "prepare_checkout", return_value=True),
+                    patch.object(w, "_restore_resume", return_value=True),
+                    patch.object(w, "_effective_authoring_profile", return_value=NS(provider="codex")),
+                    patch.object(a, "_authoring_profile", side_effect=lambda profile: profile),
+                    patch.object(
+                        a,
+                        "host_agent_argv",
+                        side_effect=OSError("argv failed")
+                        if fault == "argv"
+                        else lambda *_: ([sys.executable, "-c", "pass"], dict(os.environ)),
+                    ),
+                    patch.object(rnd, "check_claim_health", return_value=False),
+                    patch.object(w, "_refund_infra_failure") as refund,
+                ):
+                    a._AGENT_QUIESCENT = True
+                    if fault == "log":
+                        self.cfg.logdir.parent.mkdir(parents=True, exist_ok=True)
+                        self.cfg.logdir.write_text("not a directory")
+                    try:
+                        if fault in ("argv", "log"):
+                            with self.assertRaises(OSError):
+                                run(self.worker, self.sv, self.c, self.opts, False)
+                        else:
+                            self.assertEqual(run(self.worker, self.sv, self.c, self.opts, False), 75)
+                        refund.assert_not_called()
+                        self.assertEqual([self.worker.counters.read(key) for key in keys], [2] * len(keys))
+                    finally:
+                        if fault == "log":
+                            self.cfg.logdir.unlink()
+
+    def test_success_and_ambiguous_process_launch_spend_exactly_one(self):
+        popen = subprocess.Popen
+
+        def ambiguous(argv, **kwargs):
+            if argv[:2] == [sys.executable, "-c"]:
+                raise KeyboardInterrupt("process construction interrupted")
+            return popen(argv, **kwargs)
+
+        for run, keys in self.maintenance_cases():
+            for interrupted in (False, True):
+                for key in keys:
+                    self.worker.counters.write(key, 0)
+                with (
+                    self.subTest(kind=run.__name__, interrupted=interrupted),
+                    patch.object(w, "prepare_checkout", return_value=True),
+                    patch.object(w, "_restore_resume", return_value=True),
+                    patch.object(w, "_effective_authoring_profile", return_value=NS(provider="codex")),
+                    patch.object(a, "_authoring_profile", side_effect=lambda profile: profile),
+                    patch.object(
+                        a, "host_agent_argv", side_effect=lambda *_: ([sys.executable, "-c", "pass"], dict(os.environ))
+                    ),
+                    patch.object(a.subprocess, "Popen", side_effect=ambiguous if interrupted else popen),
+                ):
+                    a._AGENT_QUIESCENT = True
+                    try:
+                        if interrupted:
+                            with self.assertRaises(NoProgress):
+                                run(self.worker, self.sv, self.c, self.opts, False)
+                            self.assertTrue(w._active_resume_path(self.worker).exists())
+                        else:
+                            self.assertEqual(run(self.worker, self.sv, self.c, self.opts, False), 0)
+                        self.assertEqual([self.worker.counters.read(key) for key in keys], [1] * len(keys))
+                    finally:
+                        # The injected constructor above never spawns; retire only this fixture gate.
+                        a._AGENT_QUIESCENT = True
+                        w._active_resume_path(self.worker).unlink(missing_ok=True)
+
+    def test_charge_failure_does_not_enter_process_construction(self):
+        def unavailable_counter():
+            raise OSError("counter storage unavailable")
+
+        a._AGENT_QUIESCENT = True
+        with patch.object(a.subprocess, "Popen") as spawn, self.assertRaises(OSError):
+            a.run_agent_proc(
+                [sys.executable, "-c", "pass"],
+                env=dict(os.environ),
+                logdir=self.cfg.logdir,
+                label="synthetic",
+                provider="codex",
+                on_launch=unavailable_counter,
+            )
+        spawn.assert_not_called()
+        self.assertTrue(a.agent_quiescent())
+
+    def test_capacity_refund_requires_debit_and_no_work(self):
+        for run, keys in self.maintenance_cases():
+            for worked in (False, True):
+                for key in keys:
+                    self.worker.counters.write(key, 0)
+
+                def author(*args, on_launch, worked=worked):
+                    on_launch()
+                    if worked:
+                        (self.co / "source").write_text("work before failure\n")
+                    a._LAST_AGENT_FAILURE = None if worked else "Selected model is at capacity."
+                    return 1
+
+                with (
+                    self.subTest(kind=run.__name__, worked=worked),
+                    patch.object(w, "prepare_checkout", return_value=True),
+                    patch.object(w, "_restore_resume", return_value=True),
+                    patch.object(w, "_effective_authoring_profile", return_value=None),
+                    patch.object(w, "run_agent_host", side_effect=author),
+                ):
+                    if worked:
+                        self.assertEqual(run(self.worker, self.sv, self.c, self.opts, False), 1)
+                    else:
+                        with self.assertRaises(NoProgress):
+                            run(self.worker, self.sv, self.c, self.opts, False)
+                    self.assertEqual([self.worker.counters.read(key) for key in keys], [int(worked)] * len(keys))
 
     def test_unattributed_unpublished_commit_blocks_prepare(self):
         self.candidate()
@@ -670,8 +851,8 @@ cfg=NS(checkout=Path({str(self.co)!r}),state=Path({str(self.cfg.state)!r}),logdi
 c=Candidate(999,{self.base!r},'fixture')
 pr=NS(number=999,head_owner='fixture',head_repo='fixture',head_ref='topic')
 worker=NS(cfg=cfg,counters=Counters(cfg),rc=NS(),claims=NS(begin_branch_work=lambda *_:True),rs=NS(bust=lambda *_:None),gh=NS(pr_progress_state=lambda *_:{{'head':{self.base!r}}}))
-def run(*args):
- return a.run_agent_proc([sys.executable,'-c',{author!r}],env=dict(os.environ),logdir=cfg.logdir,label='synthetic',provider='codex')
+def run(*args,on_launch):
+ return a.run_agent_proc([sys.executable,'-c',{author!r}],env=dict(os.environ),logdir=cfg.logdir,label='synthetic',provider='codex',on_launch=on_launch)
 blocked=False
 with patch.object(w,'prepare_checkout',return_value=True),patch.object(w,'_restore_resume',return_value=True),patch.object(w,'_effective_authoring_profile',return_value=None),patch.object(w,'run_agent_host',side_effect=run),patch.object(w,'_checkpoint_resume',wraps=w._checkpoint_resume) as capture:
  try: w.do_fix(worker,NS(open_prs=[pr]),c,NS(agent_name='synthetic'),False)

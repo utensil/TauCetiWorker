@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -664,7 +665,14 @@ def host_agent_argv(prompt: str, profile: AuthoringProfile | str) -> tuple[list[
     return argv, env
 
 
-def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logdir: Path) -> int:
+def run_agent_host(
+    cwd: Path,
+    prompt: str,
+    profile: AuthoringProfile | str,
+    logdir: Path,
+    *,
+    on_launch: Callable[[], None] | None = None,
+) -> int:
     profile = _authoring_profile(profile)
     argv, env = host_agent_argv(prompt, profile)
     if os.environ.get("TAUCETI_AGENT_ECHO"):
@@ -677,6 +685,7 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
         logdir=logdir,
         label=f"agent-{profile.provider}",
         provider=profile.provider,
+        on_launch=on_launch,
     )
 
 
@@ -837,6 +846,7 @@ def run_agent_proc(
     label: str,
     provider: str,
     cwd: Path | None = None,
+    on_launch: Callable[[], None] | None = None,
 ) -> int:
     """Run an agent subprocess through its readable transcript renderer.
 
@@ -885,6 +895,9 @@ def run_agent_proc(
             os.replace(tmp, path)
         # Popen can be interrupted after the OS child exists but before returning its handle.
         # From this point onward only verified cleanup may authorize checkpoint capture.
+        # Charge only after preparation and claim admission, but before a possibly ambiguous spawn.
+        if on_launch is not None:
+            on_launch()
         _AGENT_QUIESCENT = False
         proc = subprocess.Popen(
             argv,
@@ -1493,6 +1506,7 @@ def run_in_bubble(
     inner_cmd: str | None = None,
     cred_model: str | None = None,
     allow_push: str | None = None,
+    on_launch: Callable[[], None] | None = None,
 ) -> int:
     """Open a fresh repo-scoped bubble for target, run a command inside it, pop it. By default runs the
     work agent (agent_inner_cmd) seeding the work model's credential; pass inner_cmd / cred_model to run
@@ -1637,6 +1651,7 @@ def run_in_bubble(
                 logdir=cfg.logdir,
                 label=f"agent-{wm}",
                 provider=profile.provider,
+                on_launch=on_launch,
             )
         else:  # review engine / probe — leave its output inline
             rc = subprocess.run(argv, env=env).returncode

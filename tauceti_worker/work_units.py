@@ -1027,9 +1027,9 @@ def _refund_infra_failure(w, c, label: str, charged: tuple[str, ...], reason: st
     host-agent-binary preflight above already applies: a failure every PR would have hit is charged
     to none of them.
 
-    The counters are charged UP FRONT on purpose (an un-checkout-able PR must not loop), so a refund
-    rather than a late charge is what keeps both properties. MAX_INFRA_REFUNDS bounds it in case a
-    persistent PR-specific failure ever matches the transient patterns.
+    The counters are charged immediately before subprocess launch, including ambiguous launches.
+    MAX_INFRA_REFUNDS bounds refunds in case a persistent PR-specific failure ever matches the
+    transient patterns.
 
     That bound is keyed on the PR, NOT the head. Some of the counters refunded here are per-PR and
     lifetime (`ci-pr-`, `bump-pr-`, `rebase-pr-`), so a head-keyed allowance would reset on every
@@ -1071,7 +1071,7 @@ def _do_fixlike(
     """Shared shape for fix / fix-ci / rebase: take the branch claim, then run the agent against the PR
     branch — in bubble (it checks out the PR inside the container) or on the host checkout.
 
-    `charged` names counters to spend after a successful claim and before checkout. Only a
+    `charged` names counters to spend once setup and final claim admission permit launch. Only a
     narrowly classified no-work provider outage refunds them."""
     pr, head = c.pr, c.head
     p = next((x for x in sv.open_prs if x.number == pr), None)
@@ -1085,14 +1085,26 @@ def _do_fixlike(
         return None
     if not w.claims.begin_branch_work(pr, head, p.head_ref, p.head_owner, p.head_repo):
         return None  # claimed elsewhere → caller tries the next candidate
-    for key in charged:
-        w.counters.incr(key)
+    attempt_charged = False
+
+    def charge_attempt() -> None:
+        nonlocal attempt_charged
+        if not attempt_charged:
+            for key in charged:
+                w.counters.incr(key)
+            attempt_charged = True
+
     prompt = fill_prompt(HERE / "prompts" / prompt_file, PR=pr, AGENT=opts.agent_name, BIN=wrapper_bin(bubble))
     if bubble:
         # The PR's head repo (its own fork, for a fork-PR) gets git fetch/push in the bubble. bubble also
         # auto-derives this from a PR target, so it's explicit/testable belt-and-suspenders (kim-em/bubble#320).
         rc = run_in_bubble(
-            w, f"{TAUCETI}/pull/{pr}", prompt, opts, allow_push=f"{p.head_owner}/{p.head_repo}"
+            w,
+            f"{TAUCETI}/pull/{pr}",
+            prompt,
+            opts,
+            allow_push=f"{p.head_owner}/{p.head_repo}",
+            on_launch=charge_attempt,
         )  # bubble checks out the PR inside
     else:
         _recover_active_checkout(w)
@@ -1126,7 +1138,7 @@ def _do_fixlike(
         prior_active = os.environ.get("TAUCETI_ACTIVE_CHECKOUT")
         os.environ["TAUCETI_ACTIVE_CHECKOUT"] = str(_active_resume_path(w))
         try:
-            rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
+            rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir, on_launch=charge_attempt)
         finally:
             if prior_active is None:
                 os.environ.pop("TAUCETI_ACTIVE_CHECKOUT", None)
@@ -1144,7 +1156,7 @@ def _do_fixlike(
         w.rs.bust(pr)
         if not bubble:
             _clear_resume(w, c)
-    else:
+    elif attempt_charged:
         reason = take_last_agent_infra_failure()
         _refund_infra_failure(w, c, label, charged, reason=reason)  # raises NoProgress when provider fault
     return rc
@@ -1171,7 +1183,7 @@ def do_bump(w, sv, c, opts, bubble) -> int | None:
     """Adapt a red bump-mathlib PR (the bot bumped mathlib; TauCeti/ needs to catch up). Same
     shape as a fix: claim the branch, check the PR out, drive the agent on prompts/bump.md to green it."""
     pr, head = c.pr, c.head
-    keys = (f"bump-{pr}-{head[:12]}", f"bump-pr-{pr}")  # count up front so an un-checkout-able PR can't loop
+    keys = (f"bump-{pr}-{head[:12]}", f"bump-pr-{pr}")
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="bump.md", label="bump", charged=keys)
 
 
