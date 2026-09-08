@@ -191,7 +191,7 @@ def reap_round_group(pgid: int, term_grace: float = 2.0) -> None:
         log(f"WARNING: round group {pgid} ignored SIGTERM and refused SIGKILL; stragglers may survive")
 
 
-def _session_groups(session_id: int) -> set[int]:
+def _session_processes(session_id: int) -> dict[int, int]:
     """Enumerate PID/state only, then ask the kernel for session/group identity (portable on Darwin)."""
     try:
         result = subprocess.run(["ps", "-axo", "pid=,stat="], capture_output=True, text=True, timeout=5, check=True)
@@ -201,18 +201,22 @@ def _session_groups(session_id: int) -> set[int]:
             raise ValueError("invalid or incomplete process inventory")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise Die("cannot enumerate round session safely; operator cleanup required") from exc
-    groups = set()
+    processes = {}
     for pid in pids:
         try:
             if os.getsid(pid) == session_id:
                 group = os.getpgid(pid)
                 if os.getsid(pid) == session_id:
-                    groups.add(group)
+                    processes[pid] = group
         except ProcessLookupError:
             continue
         except PermissionError as exc:
             raise Die("cannot verify process session; operator cleanup required") from exc
-    return groups
+    return processes
+
+
+def _session_groups(session_id: int) -> set[int]:
+    return set(_session_processes(session_id).values())
 
 
 def reap_round_session(session_id: int, term_grace: float = 2.0) -> None:

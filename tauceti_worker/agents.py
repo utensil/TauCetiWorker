@@ -768,13 +768,30 @@ def agent_quiescent() -> bool:
 
 
 def _author_groups(session_id: int, excluded_group: int | None = None) -> set[int]:
-    from .round import _session_groups
+    from .round import _ACTIVE_CLAIMS, _session_processes
 
     try:
-        groups = _session_groups(session_id)
+        processes = _session_processes(session_id)
     except Die as exc:
         raise NoProgress("author process status unreadable; candidate capture blocked") from exc
-    return groups - {excluded_group}
+    if excluded_group is not None:
+        controls = set()
+        # These are live control processes of THIS verified native round, not a blanket group
+        # exemption. Recovery of an older SID cannot inherit the new round's exemptions.
+        if (
+            session_id == os.getsid(0) == os.getpid()
+            and excluded_group == os.getpgrp()
+            and os.environ.get("TAUCETI_NATIVE_ROUND_PARENT") == str(os.getppid())
+        ):
+            controls.add(os.getpid())
+            heartbeat = getattr(_ACTIVE_CLAIMS, "_hb", None)
+            if heartbeat is not None and heartbeat.poll() is None:
+                controls.add(heartbeat.pid)
+        if any(group == excluded_group and pid not in controls for pid, group in processes.items()):
+            # An author can explicitly join the supervisor group. Signalling that group here
+            # would also stop the round/heartbeat; defer capture to outer teardown and recovery.
+            raise NoProgress("unexpected process in round control group; candidate capture blocked")
+    return set(processes.values()) - {excluded_group}
 
 
 def _stop_agent_group(proc, session_id: int | None = None, excluded_group: int | None = None) -> None:

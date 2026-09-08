@@ -574,6 +574,146 @@ class RecoveryTests(unittest.TestCase):
         unrelated.terminate()
         unrelated.wait(timeout=5)
 
+    def test_control_group_allows_live_registered_heartbeat(self):
+        from tauceti_worker import round as rnd
+
+        if os.environ.get("TAUCETI_NATIVE_ROUND_PARENT") != str(os.getppid()) or os.getsid(0) != os.getpid():
+            proc = subprocess.Popen(
+                [sys.executable, __file__, "RecoveryTests.test_control_group_allows_live_registered_heartbeat"],
+                start_new_session=True,
+                env={**os.environ, "TAUCETI_NATIVE_ROUND_PARENT": str(os.getpid())},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            output, _ = proc.communicate(timeout=15)
+            self.assertEqual(proc.returncode, 0, output)
+            return
+        claims = rnd.Claims(self.cfg, NS(add_cleanup=lambda fn: None))
+        with patch.object(
+            rnd,
+            "self_argv",
+            side_effect=lambda *args: [
+                sys.executable,
+                "-c",
+                "import os,sys; os.read(int(sys.argv[1]),1)",
+                args[-1],
+            ],
+        ):
+            claims.start_heartbeat("branch/fixture", "fixture/claims")
+        try:
+            self.assertEqual(os.getpgid(claims._hb.pid), os.getpgrp())
+            self.assertEqual(
+                a.run_agent_proc(
+                    [sys.executable, "-c", "pass"],
+                    env=dict(os.environ),
+                    logdir=self.cfg.logdir,
+                    label="synthetic",
+                    provider="codex",
+                ),
+                0,
+            )
+            self.assertTrue(a.agent_quiescent())
+            self.assertIsNone(claims._hb.poll())
+            self.assertFalse(a._author_groups(os.getsid(0), os.getpgrp()))
+        finally:
+            claims.stop_heartbeat()
+
+    def test_old_session_control_process_is_not_exempt_during_recovery(self):
+        old_round = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        active = w._active_resume_path(self.worker)
+        w._write_resume_meta(
+            active,
+            {
+                "pr": 999,
+                "public_head": self.base,
+                "stage": "fix",
+                "author_sid": old_round.pid,
+                "author_excluded_pgid": old_round.pid,
+            },
+        )
+        try:
+            with self.assertRaises(NoProgress):
+                w._recover_active_checkout(self.worker)
+            self.assertIsNone(old_round.poll())
+            self.assertTrue(active.exists())
+        finally:
+            old_round.terminate()
+            old_round.wait(timeout=5)
+        w._recover_active_checkout(self.worker)
+        self.assertFalse(active.exists())
+
+    def test_joined_control_group_blocks_fix_capture_until_outer_cleanup(self):
+        from tauceti_worker import round as rnd
+
+        ready = self.cfg.state.parent / "joined-ready"
+        result = self.cfg.state.parent / "joined-result"
+        writer = (
+            "import os,time; from pathlib import Path; "
+            f"Path({str(self.co / 'source')!r}).write_text('joined group edit\\n'); "
+            f"Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
+        )
+        author = (
+            "import os,subprocess,sys,time; from pathlib import Path; os.setpgid(0,os.getppid()); "
+            f"subprocess.Popen([sys.executable,'-c',{writer!r}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+            f"\nwhile not Path({str(ready)!r}).exists(): time.sleep(.01)"
+        )
+        caller = f"""
+import json,os,sys
+from pathlib import Path
+from types import SimpleNamespace as NS
+from unittest.mock import patch
+from tauceti_worker import agents as a, work_units as w
+from tauceti_worker.config import NoProgress
+from tauceti_worker.survey import Candidate,Counters
+cfg=NS(checkout=Path({str(self.co)!r}),state=Path({str(self.cfg.state)!r}),logdir=Path({str(self.cfg.logdir)!r}))
+c=Candidate(999,{self.base!r},'fixture')
+pr=NS(number=999,head_owner='fixture',head_repo='fixture',head_ref='topic')
+worker=NS(cfg=cfg,counters=Counters(cfg),rc=NS(),claims=NS(begin_branch_work=lambda *_:True),rs=NS(bust=lambda *_:None),gh=NS(pr_progress_state=lambda *_:{{'head':{self.base!r}}}))
+def run(*args):
+ return a.run_agent_proc([sys.executable,'-c',{author!r}],env=dict(os.environ),logdir=cfg.logdir,label='synthetic',provider='codex')
+blocked=False
+with patch.object(w,'prepare_checkout',return_value=True),patch.object(w,'_restore_resume',return_value=True),patch.object(w,'_effective_authoring_profile',return_value=None),patch.object(w,'run_agent_host',side_effect=run),patch.object(w,'_checkpoint_resume',wraps=w._checkpoint_resume) as capture:
+ try: w.do_fix(worker,NS(open_prs=[pr]),c,NS(agent_name='synthetic'),False)
+ except NoProgress: blocked=True
+ Path({str(result)!r}).write_text(json.dumps({{'blocked':blocked,'quiescent':a.agent_quiescent(),'active':w._active_resume_path(worker).exists(),'capture_called':capture.called,'checkpoint':w._resume_paths(worker,c)[0].exists()}}))
+"""
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        try:
+
+            def spawn(_):
+                return subprocess.Popen(
+                    [sys.executable, "-c", caller],
+                    start_new_session=True,
+                    env={**os.environ, "TAUCETI_NATIVE_ROUND_PARENT": str(os.getpid())},
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+            with patch.object(rnd, "spawn_round", side_effect=spawn):
+                self.assertEqual(rnd.run_round_subprocess([], timeout=10), 0)
+            self.assertEqual(
+                json.loads(result.read_text()),
+                {
+                    "blocked": True,
+                    "quiescent": False,
+                    "active": True,
+                    "capture_called": False,
+                    "checkpoint": False,
+                },
+            )
+            self.assertIsNone(unrelated.poll())
+            writer_pid = int(ready.read_text())
+            status = RUN(["ps", "-p", str(writer_pid), "-o", "stat="], capture_output=True, text=True)
+            self.assertTrue(status.returncode or status.stdout.strip().startswith("Z"))
+            w._recover_active_checkout(self.worker)
+            self.assertFalse(w._active_resume_path(self.worker).exists())
+            self.assertTrue(w._restore_resume(self.worker, self.c, self.pr))
+            self.assertEqual((self.co / "source").read_text(), "joined group edit\n")
+        finally:
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
+
     def test_native_sigkill_reaps_regrouped_writer_before_recovery(self):
         from tauceti_worker import round as rnd
 
