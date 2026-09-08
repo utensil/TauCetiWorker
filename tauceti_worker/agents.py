@@ -866,6 +866,9 @@ def run_agent_proc(
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(meta) + "\n", encoding="utf-8")
             os.replace(tmp, path)
+        # Popen can be interrupted after the OS child exists but before returning its handle.
+        # From this point onward only verified cleanup may authorize checkpoint capture.
+        _AGENT_QUIESCENT = False
         proc = subprocess.Popen(
             argv,
             cwd=cwds,
@@ -880,7 +883,6 @@ def run_agent_proc(
             process_group=0 if native else None,
             start_new_session=not native,
         )
-        _AGENT_QUIESCENT = False
         assert proc.stdout is not None
         lines: queue.Queue = queue.Queue()
 

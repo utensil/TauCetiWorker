@@ -440,6 +440,73 @@ class RecoveryTests(unittest.TestCase):
             w._restore_resume(self.worker, self.c, self.pr)
         self.assertFalse(a._checkout_preserved(self.cfg))
 
+    def test_interrupted_popen_never_captures_while_os_child_is_alive(self):
+        ready = self.co / "spawn-ready"
+        code = (
+            "# tcwork-spawn-boundary\nfrom pathlib import Path; import time; "
+            f"Path({str(self.co / 'source')!r}).write_text('edit before spawn returns\\n'); "
+            f"Path({str(ready)!r}).touch(); time.sleep(60)"
+        )
+        popen = subprocess.Popen
+        processes = []
+
+        def interrupted_spawn(argv, *args, **kwargs):
+            proc = popen(argv, *args, **kwargs)
+            if any("tcwork-spawn-boundary" in str(arg) for arg in argv):
+                processes.append(proc)
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                raise KeyboardInterrupt("interrupted after OS launch, before Popen returns")
+            return proc
+
+        def author(*args):
+            return a.run_agent_proc(
+                [sys.executable, "-c", code],
+                env=dict(os.environ),
+                logdir=self.cfg.logdir,
+                label="synthetic",
+                provider="codex",
+            )
+
+        a._AGENT_QUIESCENT = True
+        try:
+            with (
+                patch.object(w, "_restore_resume", return_value=True),
+                patch.object(a.subprocess, "Popen", side_effect=interrupted_spawn),
+                patch.object(w, "_checkpoint_resume", wraps=w._checkpoint_resume) as capture,
+            ):
+                with self.assertRaises(NoProgress):
+                    self.run_fix(author)
+            capture.assert_not_called()
+            self.assertIsNone(processes[0].poll())
+            self.assertFalse(a.agent_quiescent())
+            self.assertTrue(w._active_resume_path(self.worker).exists())
+            self.assertFalse(w._resume_paths(self.worker, self.c)[0].exists())
+            self.assertEqual((self.co / "source").read_text(), "edit before spawn returns\n")
+        finally:
+            for proc in processes:
+                a._stop_agent_group(
+                    proc, os.getsid(proc.pid), os.getpgrp() if os.getsid(proc.pid) == os.getsid(0) else None
+                )
+                if proc.stdout:
+                    proc.stdout.close()
+            a._AGENT_QUIESCENT = True
+
+    def test_native_interrupted_popen_retains_recovery_gate(self):
+        # Run the same complete work-unit boundary in an explicitly supervised native session.
+        proc = subprocess.Popen(
+            [sys.executable, __file__, "RecoveryTests.test_interrupted_popen_never_captures_while_os_child_is_alive"],
+            start_new_session=True,
+            env={**os.environ, "TAUCETI_NATIVE_ROUND_PARENT": str(os.getpid())},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        output, _ = proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 0, output)
+
     def test_incomplete_direct_author_launch_blocks_recovery(self):
         active = w._active_resume_path(self.worker)
         w._write_resume_meta(
