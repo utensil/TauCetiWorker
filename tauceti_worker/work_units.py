@@ -66,6 +66,7 @@ from .review_diagnostics import (
     clear_review_failure,
     public_review_failure,
     read_review_failure,
+    read_review_round,
     record_review_failure,
     recover_review_failures,
 )
@@ -605,6 +606,7 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
     if reviewers in ("auto", ""):
         raise Die("review needs a concrete reviewer model (resolve --agent / quota first)")
     errkey = f"review-err-{pr}"
+    previous_round = read_review_round(w.cfg.store_dir, pr)
     if c.contest:
         # Claim the in-flight contest with a 👀 on the contesting reply so a peer worker re-surveying
         # before the new scoreboard lands skips it (cross-fleet dedup). The engine auto-detects the
@@ -652,13 +654,28 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
             )
         log(f"  review #{pr}: engine rc={rc}")
         if rc == 0:
-            # The engine posted a verdict this round (scoreboard + threads are on the PR now), so clear
-            # the "errored without posting a verdict" streak up front — BEFORE the publish step, which is
-            # a separate machine-wide concern. Otherwise a pre-post error streak (e.g. errkey=2) could
-            # combine with one later engine error to trip the escalation cap a round after a verdict was
-            # in fact posted, contradicting the "errored Nx without posting a verdict" message.
-            w.counters.write(errkey, 0)
-            clear_review_failure(w.cfg.state, pr)
+            current_round = read_review_round(w.cfg.store_dir, pr)
+            incomplete = bool(
+                current_round
+                and current_round.head == head
+                and current_round.errors
+                and (previous_round is None or current_round.number > previous_round.number)
+            )
+            if incomplete:
+                reason = f"review incomplete: {current_round.errors} rubric execution error(s) at the reviewed head"
+                record_review_failure(
+                    w.cfg.state,
+                    worker=w.cfg.wid,
+                    pr=pr,
+                    head=head,
+                    provider=reviewers,
+                    code=rc,
+                    reason=reason,
+                )
+                report_failure(reason, code=rc)
+            else:
+                w.counters.write(errkey, 0)
+                clear_review_failure(w.cfg.state, pr)
             # The engine archived this round's records to <store>/outbox but did NOT push (--no-sync).
             # Publish them to TauCetiData with the host's creds. Loud on failure: records stuck in the
             # outbox mean the merge gate can't see this round, so don't report the round as a success.
@@ -681,6 +698,16 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
                     f"the host's git/gh credentials; the loop re-drains on its own once it is fixed."
                 )
                 raise NoProgress(f"review #{pr}: TauCetiData publish failed — machine-wide, not charged to the PR")
+            if incomplete:
+                w.rs.bust(pr)
+                warn_red(
+                    f"review #{pr}: the engine exited successfully but the recorded round is incomplete "
+                    f"({current_round.errors} rubric execution errors). Partial records were synced; "
+                    f"backing off without charging the PR's no-verdict error budget."
+                )
+                raise NoProgress(
+                    f"review #{pr}: incomplete rubric execution — retry after back-off, not charged to the PR"
+                )
             if c.contest:
                 # The engine advanced replies_through in the new scoreboard (the durable per-reply
                 # watermark); rs.bust below re-fetches it, so this contest won't re-fire once the 👀

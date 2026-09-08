@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .runtime_status import atomic_json
@@ -29,6 +30,7 @@ _PUBLIC_CATEGORIES = {
     "checkout-or-network",
     "review-engine",
     "review-command",
+    "review-incomplete",
 }
 _PUBLIC_PROVIDERS = {"claude", "codex", "deepseek", "kiro", "minimax", "sonnet"}
 _PUBLIC_DETAILS = {
@@ -39,6 +41,7 @@ _PUBLIC_DETAILS = {
     "checkout-or-network": "checkout or network operation failed",
     "review-engine": "review engine failed",
     "review-command": "review command failed",
+    "review-incomplete": "review posted with rubric execution errors",
 }
 _STAMP_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 
@@ -62,6 +65,8 @@ def sanitize_failure(text: str, limit: int = 500) -> str:
 def classify_failure(summary: str) -> str:
     """Coarse failure class used for alerts and future retry policy."""
     low = summary.lower()
+    if low.startswith("review incomplete:"):
+        return "review-incomplete"
     if any(s in low for s in ("not logged in", "run /login", "authentication", "credential")):
         return "reviewer-auth"
     if any(s in low for s in ("not found on path", "no such file or directory", "command not found")):
@@ -94,6 +99,38 @@ def classify_failure(summary: str) -> str:
     if any(s in low for s in ("traceback", "exception", "error:")):
         return "review-engine"
     return "review-command"
+
+
+@dataclass(frozen=True)
+class ReviewRound:
+    number: int
+    timestamp: str
+    head: str
+    errors: int
+
+
+def read_review_round(store: Path, pr: int) -> ReviewRound | None:
+    """Read only structural outcome fields from the latest local engine round.
+
+    Missing or malformed legacy state supplies no new evidence. The caller must compare
+    snapshots and the expected head before attributing errors to its current invocation.
+    """
+    try:
+        ledger = json.loads((store / "ledger.json").read_text())
+        rounds = ledger["prs"][str(pr)]["rounds"]
+        if not isinstance(rounds, list) or not rounds:
+            return None
+        latest = rounds[-1]
+        number, timestamp, head, states = (latest[key] for key in ("round", "ts", "head_sha", "states"))
+        if type(number) is not int or number < 1:
+            return None
+        if not isinstance(timestamp, str) or not timestamp or not isinstance(head, str) or not head:
+            return None
+        if not isinstance(states, dict):
+            return None
+        return ReviewRound(number, timestamp, head, sum(state == "error" for state in states.values()))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _last_log_line(log_file: Path | None) -> str:

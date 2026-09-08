@@ -164,6 +164,14 @@ exists only in process arguments.
 
 ### Keeping this scoped-review fork current
 
+A zero review-engine exit does not necessarily mean every rubric completed. If the local ledger
+records a new round for the expected head with rubric execution errors, the Worker publishes the
+partial archive, retains a structural `review-incomplete` diagnostic, and backs off instead of
+reporting success or charging the PR's no-verdict error budget. Existing daily review limits still
+apply. Old or different-head records do not establish a failure of the current invocation; missing
+legacy ledger evidence leaves exit-code handling unchanged. This does not classify the underlying
+provider failure or change the external review engine's own within-round retries.
+
 Scoped-review production lives on `dev`. Before a new review round, run `scripts/sync-upstream --push`
 from a clean `dev` checkout. It fetches `kim-em/TauCetiWorker:main`, merges that upstream head into
 `dev`, runs the fork's lint and test gates, and pushes the verified production commit. It does not update
