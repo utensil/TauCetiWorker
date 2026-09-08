@@ -210,7 +210,9 @@ def _prioritize_continuation(w: Worker, sv: Survey) -> None:
     try:
         current = subprocess.run(
             ["git", "-C", str(w.cfg.checkout), "symbolic-ref", "--quiet", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         ).stdout.strip()
     except (AttributeError, OSError, subprocess.SubprocessError):
         return
@@ -977,7 +979,9 @@ def _clear_published_resume(w: Worker, c: Candidate, branch: str) -> None:
     try:
         status = subprocess.run(
             ["git", "-C", str(w.cfg.checkout), "status", "--porcelain=v2", "--branch", "--untracked-files=all"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         remote = w.gh.pr_progress_state(c.pr)
     except (OSError, subprocess.SubprocessError, GitHubError):
@@ -1077,9 +1081,16 @@ def _do_fixlike(
     else:
         meta = _resume_metadata(w, c)
         saved = meta if isinstance(meta, dict) else {}
-        reuse = None if meta is None else continuation_checkout(
-            w.cfg, p.head_ref, head, saved_head=str(saved.get("candidate_head") or ""),
-            saved_payload=bool(saved.get("stash_ref")),
+        reuse = (
+            None
+            if meta is None
+            else continuation_checkout(
+                w.cfg,
+                p.head_ref,
+                head,
+                saved_head=str(saved.get("candidate_head") or ""),
+                saved_payload=bool(saved.get("stash_ref")),
+            )
         )
         if reuse is None:
             report_failure(f"{label} #{pr}: checkout has unpreserved or ambiguous work", code=1)
