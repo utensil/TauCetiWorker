@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """The unrestricted work predictor and runtime follow the documented priority order."""
 
+import json
 import os
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -43,6 +45,22 @@ checks.append(
     )
 )
 checks.append(check("progress tool still receives its command", progress_cmd[-1], "due"))
+
+# A positive cache must not override state recorded by a subsequent progress attempt.
+with tempfile.TemporaryDirectory() as tmp:
+    cfg = SimpleNamespace(state=Path(tmp))
+    counters = tc.Counters(cfg)
+    cache = cfg.state / "cache" / "progress-due.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps({"due": True, "reason": "cached due"}))
+    with patch("tauceti_worker.survey.subprocess.run", side_effect=AssertionError("unexpected due lookup")):
+        counters.write("progress-attempt-ts", int(cache.stat().st_mtime))
+        checks.append(check("attempt delay overrides fresh positive cache", tc.progress_due(cfg, counters)[0], False))
+        counters.write("progress-attempt-ts", 0)
+        counters.write("progress-err", tc.MAX_PROGRESS_ERRORS)
+        checks.append(check("error limit overrides fresh positive cache", tc.progress_due(cfg, counters)[0], False))
+        counters.write("progress-err", 0)
+        checks.append(check("eligible worker still reuses cache", tc.progress_due(cfg, counters), (True, "cached due")))
 
 # Drive the real cascade as well as its status predictor. A future edit must not let their shared
 # priority drift while leaving this display-only helper green.
@@ -95,10 +113,12 @@ checks.append(check("stale progress verdict falls through to fix-ci", seen, ["pr
 saved_prepare_checkout = tc.work_units.prepare_checkout
 saved_run = tc.work_units.subprocess.run
 writes = []
+plan_argv = []
 
 
 def fake_run(argv, *_a, **_k):
     if "plan" in argv:
+        plan_argv.extend(argv)
         return SimpleNamespace(returncode=tc.EX_NOPROGRESS, stdout="", stderr="not due")
     return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -117,6 +137,13 @@ with tempfile.TemporaryDirectory() as tmp:
         tc.work_units.subprocess.run = saved_run
 checks.append(check("fresh not-due plan returns the fallthrough signal", progress_result, None))
 checks.append(check("fresh plan re-check records the attempt", writes[0][0], "progress-attempt-ts"))
+checks.append(
+    check(
+        "planner discovers merges on main",
+        ["--ref", "origin/main"] in [plan_argv[i : i + 2] for i in range(len(plan_argv) - 1)],
+        True,
+    )
+)
 
 # Bumps and rebases remain ahead of reporting.
 busy.bump.actionable.append(candidate)
