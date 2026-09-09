@@ -558,17 +558,9 @@ def progress_due(cfg: Config, counters: Counters) -> tuple[bool, str]:
     so a broken `uvx`, a GitHub hiccup or a bad exit here must read as "not due" and let the round fall
     through to review and fix work. A stage that can throw is a stage that can wedge the worker.
     """
-    cache = cfg.state / "cache" / "progress-due.json"
-    try:
-        if cache.exists() and (time.time() - cache.stat().st_mtime) < PROGRESS_TTL:
-            d = json.loads(cache.read_text())
-            return bool(d.get("due")), str(d.get("reason") or "")
-    except (OSError, ValueError):
-        pass
-
     # A durable attempt breaker, independent of whether a report ever LANDS. The cadence check keys on
     # the last merged report, so a stuck or rejected PR would otherwise leave it true for ever and
-    # every round would burn on it.
+    # every round would burn on it. Check before the cache: an attempt can invalidate a fresh "due".
     last_attempt = counters.read("progress-attempt-ts")
     if last_attempt and (time.time() - last_attempt) < PROGRESS_ATTEMPT_GAP:
         gap_h = (time.time() - last_attempt) / 3600.0
@@ -578,6 +570,14 @@ def progress_due(cfg: Config, counters: Counters) -> tuple[bool, str]:
             f"progress rounds have failed {counters.read('progress-err')}x; "
             f"backing off (clear state/progress-err to retry)"
         )
+
+    cache = cfg.state / "cache" / "progress-due.json"
+    try:
+        if cache.exists() and (time.time() - cache.stat().st_mtime) < PROGRESS_TTL:
+            d = json.loads(cache.read_text())
+            return bool(d.get("due")), str(d.get("reason") or "")
+    except (OSError, ValueError):
+        pass
 
     try:
         proc = subprocess.run(progress_argv(cfg.state, "due"), capture_output=True, text=True, timeout=300)

@@ -1379,12 +1379,16 @@ def _do_progress_inner(w, opts) -> int | None:
 
     # 1) The decision, re-run from FRESH state now that the claim is held — never from the survey's
     #    cached verdict, which is up to PROGRESS_TTL old and says nothing about which area won.
+    # Discover merges on main so new areas can wait for docs instead of looking like missing history.
+    # The planner still closes the report window at the published documentation's commit.
     proc = run_tool(
         "plan",
         "--roadmap-dir",
         str(roadmap_dir),
         "--code-dir",
         str(w.cfg.checkout),
+        "--ref",
+        "origin/main",
         "--out",
         str(plan_file),
         capture=True,
