@@ -179,7 +179,9 @@ class ActivityTests(unittest.TestCase):
             return snapshot
 
         with patch.object(a, "processes", side_effect=sample):
-            self.assertEqual(self.run_round("escaped"), 0)
+            # This checks cleanup ownership, not the idle threshold. Allow process
+            # startup and sampling on a busy host before the fixture exits.
+            self.assertEqual(self.run_round("escaped", timeout=2), 0)
         self.assertTrue(checked)
         self.assertNotIn((self.state / "escaped-pid").read_text(), original())
         with (self.state / "round.lock").open("a+") as peer:
