@@ -34,6 +34,8 @@ def processes() -> dict[str, dict]:
     """
     result = subprocess.run(
         ["ps", "-axo", "pid=,ppid=,pgid=,stat=,lstart="],
+        # Observers can inherit different timezones/locales from their callers.
+        env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
         capture_output=True,
         text=True,
         check=True,

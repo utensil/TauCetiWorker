@@ -53,6 +53,14 @@ with RoundContext(SimpleNamespace(state=state,wid='test')):
 
 
 class ActivityTests(unittest.TestCase):
+    def test_process_identity_ignores_observer_timezone(self):
+        identities = []
+        for zone in ("UTC", "Asia/Singapore", "America/New_York"):
+            with patch.dict(os.environ, TZ=zone):
+                identities.append(a.processes()[str(os.getpid())])
+        self.assertEqual(identities[0], identities[1])
+        self.assertEqual(identities[0], identities[2])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.state = Path(self.tmp.name)
