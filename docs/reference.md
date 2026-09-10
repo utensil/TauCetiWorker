@@ -203,7 +203,7 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `TAUCETI_BUBBLE_HOME` | per-worker cache dir | Override the private bubble home. |
 | `TAUCETI_REVIEW_ENGINE_DIR` | — | Use a local `tauceti-review` checkout instead of fetching the engine. |
 | `TAUCETI_POLL` | `300` | Seconds between quota checks while the loop waits. |
-| `TAUCETI_ROUND_TIMEOUT` | `5400` | Hard cap per round (seconds). |
+| `TAUCETI_ROUND_TIMEOUT` | `5400` | Maximum inactivity per loop round (seconds). Distinct useful work resets this timer. |
 | `TAUCETI_INTERROUND` | `20` | Minimum gap after a productive round (seconds). |
 | `TAUCETI_BACKOFF_BASE` / `TAUCETI_BACKOFF_MAX` | `30` / `900` | The escalating no-progress back-off (seconds). |
 | `TAUCETI_PROGRESS_GAP` | `28800` | Minimum gap between progress-report attempts (seconds; eight hours by default). |
@@ -216,3 +216,28 @@ Flags win over these. Most are tuning knobs with sane defaults.
 Worker configuration paths (`TAUCETI_WORKERS_CONFIG`, `TAUCETI_CONFIG_HOME`,
 `TAUCETI_WORKERS_STATE_DIR`, `TAUCETI_RUNTIME_DIR`) are documented in
 [the workers documentation](workers.md).
+
+### Round lifetime
+
+Loop rounds use `TAUCETI_ROUND_TIMEOUT` as an inactivity timeout. Distinct,
+successful Codex command, file-change and tool results reset it automatically.
+Heartbeats, repeated results, common polling commands and failed commands do not.
+Quiet computation gets the same bounded inactivity allowance; PID existence or
+CPU use alone cannot reset the timer. Other event formats currently do not reset
+it. There are no additional configuration settings.
+
+The existing worker `round.lock` stays held until the round and its known owned
+processes have stopped. The native claim heartbeat continues normally; lost-claim
+and operator stop signals override activity. After supervisor failure, the native
+round retains its inherited lock, and subsequent admission rejects recorded
+survivors. Cleanup uses process identities, groups, observed descendants and
+registered delegates. This is host accounting: a child that detaches and loses
+its parent between samples can escape attribution. Preserve the existing worker
+state/runtime-status path and records during recovery.
+
+Synchronous wrappers can forward a delegated Codex JSON stream through
+`python -m tauceti_worker.round_activity -- COMMAND ...`, using the native
+interpreter and inherited round environment. Raw output is unchanged. The
+existing runtime-status file stores identities and the last useful-work time,
+without command text or output. Round identity and lock-descriptor handoff are
+internal process plumbing, not operator settings.

@@ -814,6 +814,8 @@ def run_agent_proc(
         tail.extend(rendered.splitlines())
 
     def run_rendered(destination) -> int:
+        from .round_activity import Activity
+
         proc = subprocess.Popen(
             argv,
             cwd=cwds,
@@ -827,7 +829,9 @@ def run_agent_proc(
         )
         assert proc.stdout is not None
         try:
+            activity = Activity(proc.pid)
             for line in proc.stdout:
+                activity.observe(line)
                 rendered = renderer.render_line(line)
                 if rendered:
                     write_rendered(destination, rendered)

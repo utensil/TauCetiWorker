@@ -39,6 +39,7 @@ class RoundContext:
         self._fd: int | None = None
         self._cleanups: list = []
         self._done = False
+        self._supervised = False
         # The checkout baseline established by the selected work unit.  This is deliberately set
         # after any target-branch checkout, not when the round starts: the shared host checkout may
         # still be on another PR from the preceding round.
@@ -47,7 +48,15 @@ class RoundContext:
     def __enter__(self) -> RoundContext:
         self.cfg.state.mkdir(parents=True, exist_ok=True)
         path = self.cfg.state / "round.lock"
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
+        inherited = os.environ.pop("TAUCETI_ROUND_LOCK_FD", None)
+        if inherited is not None:
+            fd = int(inherited)
+            opened, expected = os.fstat(fd), path.stat()
+            if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+                raise Die("supervised round lock does not match this worker")
+            self._supervised = True
+        else:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
         os.set_inheritable(fd, False)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -57,6 +66,15 @@ class RoundContext:
                 f"another round for worker '{self.cfg.wid}' holds {path} — one round per worker at a time"
             ) from None
         self._fd = fd
+        if not self._supervised:
+            from .round_activity import refuse_surviving_work
+
+            try:
+                refuse_surviving_work(self.cfg)
+            except BaseException:
+                os.close(fd)
+                self._fd = None
+                raise
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
         atexit.register(self._cleanup)
@@ -76,7 +94,10 @@ class RoundContext:
                 log(f"cleanup step failed: {e}")
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                # An explicit unlock would also unlock the supervisor's shared
+                # description before it has verified descendant cleanup.
+                if not self._supervised:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
                 os.close(self._fd)
             except OSError:
                 pass
@@ -87,12 +108,13 @@ class RoundContext:
         return False
 
 
-def spawn_round(argv_tail: list[str]) -> subprocess.Popen:
+def spawn_round(argv_tail: list[str], **popen_options) -> subprocess.Popen:
     """Spawn one round as a child in its OWN session (so the loop can kill the whole group). Invokes
     the current interpreter directly on this file (NOT via the uv shebang) to avoid a uv wrapper
     process between the loop and the round — sys.executable is already the uv-resolved interpreter."""
     cmd = self_argv("_round", *argv_tail)
-    return subprocess.Popen(cmd, start_new_session=True, env=self_env())
+    popen_options["env"] = self_env(popen_options.get("env"))
+    return subprocess.Popen(cmd, start_new_session=True, **popen_options)
 
 
 def signal_group(pgid: int, sig: int) -> str:
@@ -314,28 +336,7 @@ def cmd_heartbeat(args) -> int:
 
 
 def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> int:
-    """Run one round as a child under a hard timeout; tear down the group on expiry. Used by the loop.
-    Maps a timed-out round to rc 124, a SIGKILL-after-grace to 137 (matching the shell's `timeout`)."""
-    p = spawn_round(argv_tail)
-    pgid = p.pid  # spawn_round's start_new_session ⇒ the round leads its own group; pgid == leader pid
-    try:
-        return p.wait(timeout)
-    except subprocess.TimeoutExpired:
-        log(f"round timed out after {timeout}s — tearing down")
-        kill_round_group(p)
-        rc = p.returncode
-        return 137 if rc is not None and rc < 0 and -rc == signal.SIGKILL else 124
-    except KeyboardInterrupt:
-        kill_round_group(p)
-        raise
-    finally:
-        # Even a round that exits 0 can leave the agent's backgrounded build-waiters alive; the timeout
-        # path's kill_round_group never runs for it. Sweep the group on EVERY exit so a leaked poll-loop
-        # lives at most one round, not forever (a no-op once kill_round_group already cleared the group).
-        # Unlike kill_round_group (which signals while the leader PID is still live), p.wait() has already
-        # reaped the leader here, so the group is held open only by stragglers. The lone wrong-kill window
-        # — the freed leader PID being reused AND the reuser making itself a group leader before this line
-        # — is microseconds wide and needs a deliberate setsid; we accept it. (One-shot `tauceti work`
-        # runs the round in-process, not through here, so it is not swept; only the unbounded --loop leak
-        # is operationally damaging, so that scope gap is acceptable.)
-        reap_round_group(pgid)
+    """Run a round until completion or inactivity; retain exclusion through cleanup."""
+    from .round_activity import supervise
+
+    return supervise(argv_tail, timeout)
