@@ -814,6 +814,8 @@ def run_agent_proc(
         tail.extend(rendered.splitlines())
 
     def run_rendered(destination) -> int:
+        from .round_activity import Activity
+
         proc = subprocess.Popen(
             argv,
             cwd=cwds,
@@ -826,8 +828,11 @@ def run_agent_proc(
             bufsize=1,
         )
         assert proc.stdout is not None
+        activity = None
         try:
+            activity = Activity(proc.pid)
             for line in proc.stdout:
+                activity.observe(line)
                 rendered = renderer.render_line(line)
                 if rendered:
                     write_rendered(destination, rendered)
@@ -837,6 +842,8 @@ def run_agent_proc(
             raise
         finally:
             proc.stdout.close()
+            if activity is not None:
+                activity.finish()
         rc = proc.wait()
         if provider in {"codex", "claude"} and not renderer.active:
             write_rendered(destination, f"[warning] no structured {provider} events were recognized\n")

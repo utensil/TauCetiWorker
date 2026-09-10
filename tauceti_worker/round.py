@@ -39,6 +39,7 @@ class RoundContext:
         self._fd: int | None = None
         self._cleanups: list = []
         self._done = False
+        self._supervised = False
         # The checkout baseline established by the selected work unit.  This is deliberately set
         # after any target-branch checkout, not when the round starts: the shared host checkout may
         # still be on another PR from the preceding round.
@@ -47,7 +48,15 @@ class RoundContext:
     def __enter__(self) -> RoundContext:
         self.cfg.state.mkdir(parents=True, exist_ok=True)
         path = self.cfg.state / "round.lock"
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
+        inherited = os.environ.pop("TAUCETI_ROUND_LOCK_FD", None)
+        if inherited is not None:
+            fd = int(inherited)
+            opened, expected = os.fstat(fd), path.stat()
+            if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+                raise Die("supervised round lock does not match this worker")
+            self._supervised = True
+        else:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o644)
         os.set_inheritable(fd, False)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -57,6 +66,15 @@ class RoundContext:
                 f"another round for worker '{self.cfg.wid}' holds {path} — one round per worker at a time"
             ) from None
         self._fd = fd
+        if not self._supervised:
+            from .round_activity import refuse_surviving_work
+
+            try:
+                refuse_surviving_work(self.cfg)
+            except BaseException:
+                os.close(fd)
+                self._fd = None
+                raise
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
         atexit.register(self._cleanup)
@@ -76,7 +94,10 @@ class RoundContext:
                 log(f"cleanup step failed: {e}")
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                # An explicit unlock would also unlock the supervisor's shared
+                # description before it has verified descendant cleanup.
+                if not self._supervised:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
                 os.close(self._fd)
             except OSError:
                 pass
@@ -316,6 +337,10 @@ def cmd_heartbeat(args) -> int:
 def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> int:
     """Run one round as a child under a hard timeout; tear down the group on expiry. Used by the loop.
     Maps a timed-out round to rc 124, a SIGKILL-after-grace to 137 (matching the shell's `timeout`)."""
+    if os.environ.get("TAUCETI_EXTEND_ACTIVE_ROUNDS") == "1":
+        from .round_activity import supervise
+
+        return supervise(argv_tail, timeout)
     p = spawn_round(argv_tail)
     pgid = p.pid  # spawn_round's start_new_session ⇒ the round leads its own group; pgid == leader pid
     try:

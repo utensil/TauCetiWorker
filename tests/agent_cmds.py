@@ -106,6 +106,7 @@ calls = []
 
 class FakeProc:
     def __init__(self, output="", returncode=0):
+        self.pid = 999999
         self.stdout = io.StringIO(output)
         self.returncode = returncode
 
