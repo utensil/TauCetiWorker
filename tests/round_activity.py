@@ -138,6 +138,26 @@ class ActivityTests(unittest.TestCase):
         self.assertGreater(time.monotonic() - started, 0.7)
         self.assertFalse(read_json(self.path)["round_work"]["owned"])
 
+    def test_busy_lock_returns_error_without_replacing_round_then_recovers(self):
+        previous = read_json(self.path)["round_work"]
+        with (self.state / "round.lock").open("a+") as peer:
+            fcntl.flock(peer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch("tauceti_worker.round.spawn_round") as spawn:
+                self.assertEqual(self.run_round("progress"), 1)
+                spawn.assert_not_called()
+            self.assertEqual(read_json(self.path)["round_work"], previous)
+            self.assertIn("another round holds", read_json(self.path)["failure_reason"])
+        self.assertEqual(self.run_round("progress"), 0)
+
+    def test_surviving_work_returns_error_without_spawning(self):
+        identity = a.processes()[str(os.getpid())]
+        previous = {"agents": {}, "owned": {str(os.getpid()): identity}}
+        atomic_json(self.path, {"round_work": previous})
+        with patch("tauceti_worker.round.spawn_round") as spawn:
+            self.assertEqual(self.run_round("progress"), 1)
+            spawn.assert_not_called()
+        self.assertEqual(read_json(self.path)["round_work"], previous)
+
     def test_quiet_work_has_bounded_grace(self):
         started = time.monotonic()
         self.assertEqual(self.run_round("quiet"), 124)

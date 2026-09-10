@@ -338,5 +338,12 @@ def cmd_heartbeat(args) -> int:
 def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> int:
     """Run a round until completion or inactivity; retain exclusion through cleanup."""
     from .round_activity import supervise
+    from .runtime_status import report_failure
 
-    return supervise(argv_tail, timeout)
+    try:
+        return supervise(argv_tail, timeout)
+    except Die as exc:
+        # Admission used to fail in the child; keep the loop's normal backoff.
+        log(str(exc))
+        report_failure(str(exc), code=1)
+        return 1
