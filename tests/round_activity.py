@@ -17,7 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tauceti_worker import round_activity as a
-from tauceti_worker.round import RoundContext
+from tauceti_worker.round import RoundContext, run_round_subprocess
 from tauceti_worker.runtime_status import atomic_json, read_json
 
 CHILD = """
@@ -49,7 +49,6 @@ with RoundContext(SimpleNamespace(state=state,wid='test')):
         (state/'escaped-pid').write_text(str(p.pid))
         time.sleep(10 if mode=='orphan' else .1)
         os._exit(0)
-    activity.finish()
 """
 
 
@@ -64,17 +63,17 @@ class ActivityTests(unittest.TestCase):
             {
                 a.TOKEN_ENV: "test",
                 a.STATUS_ENV: str(self.path),
-                "TAUCETI_ROUND_ACTIVITY_POLL": ".05",
-                "TAUCETI_ROUND_ACTIVITY_FRESH": ".25",
-                "TAUCETI_ROUND_QUIET_GRACE": ".45",
-                "TAUCETI_ROUND_EXTENSION": ".1",
-                "TAUCETI_ROUND_TERM_GRACE": ".2",
             },
         )
         self.env.start()
-        atomic_json(self.path, {"round_work": {"token": "test", "agents": {}, "owned": {}}})
+        self.poll = patch.object(a, "POLL_INTERVAL", 0.05)
+        self.poll.start()
+        atomic_json(
+            self.path, {"round_work": {"token": "test", "agents": {}, "owned": {}, "progress": time.monotonic()}}
+        )
 
     def tearDown(self):
+        self.poll.stop()
         self.env.stop()
         self.tmp.cleanup()
 
@@ -96,38 +95,34 @@ class ActivityTests(unittest.TestCase):
             event["item"].update(command="curl service", exit_code=1, aggregated_output="changing network failure")
             observer.observe(json.dumps(event))
         work = read_json(self.path)["round_work"]
-        self.assertEqual(work["agents"][str(os.getpid())]["progress"], 10)
+        self.assertEqual(work["progress"], 10)
         self.assertNotIn("rg lemma", self.path.read_text())
         self.assertNotIn("found", self.path.read_text())
 
-    def test_decision_rejects_wrong_identity_finished_and_future_times(self):
-        identity = {"pid": 123, "birth": "birth", "progress": 10, "finished": False}
-        work = {"agents": {"123": identity}}
-        snap = {"123": {"pid": 123, "birth": "birth"}}
-        self.assertEqual(a.decision(work, snap, 11, fresh=2, quiet=5), "progress")
-        self.assertEqual(a.decision(work, snap, 14, fresh=2, quiet=5), "quiet-grace")
-        self.assertEqual(a.decision(work, snap, 16, fresh=2, quiet=5), "expired")
-        snap["123"]["cpu"] = 100000
-        self.assertEqual(a.decision(work, snap, 16, fresh=2, quiet=5), "expired")
-        self.assertEqual(a.decision(work, snap, 9, fresh=2, quiet=5), "expired")
-        snap["123"]["birth"] = "reused"
-        self.assertEqual(a.decision(work, snap, 11, fresh=2, quiet=5), "expired")
-        identity["finished"] = True
-        snap["123"]["birth"] = "birth"
-        self.assertEqual(a.decision(work, snap, 11, fresh=2, quiet=5), "expired")
+    def test_registration_does_not_reset_idle_clock(self):
+        before = read_json(self.path)["round_work"]["progress"]
+        a.Activity(os.getpid())
+        self.assertEqual(read_json(self.path)["round_work"]["progress"], before)
 
     def test_old_observer_cannot_refresh_new_round(self):
         observer = a.Activity(os.getpid())
         atomic_json(self.path, {"round_work": {"token": "replacement", "agents": {}}})
         with self.assertRaisesRegex(RuntimeError, "identity"):
-            observer.finish()
+            observer.observe(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "file_change", "status": "completed", "changes": ["fixture"]},
+                    }
+                )
+            )
 
     def run_round(self, mode, timeout=0.3):
         with (
             patch.object(a.Config, "resolve", return_value=self.cfg),
-            patch.object(a, "self_argv", return_value=[sys.executable, "-c", CHILD, str(self.state), mode]),
+            patch("tauceti_worker.round.self_argv", return_value=[sys.executable, "-c", CHILD, str(self.state), mode]),
         ):
-            return a.supervise([], timeout)
+            return run_round_subprocess([], timeout)
 
     def test_live_work_extends_same_round(self):
         started = time.monotonic()
@@ -139,7 +134,7 @@ class ActivityTests(unittest.TestCase):
         started = time.monotonic()
         self.assertEqual(self.run_round("quiet"), 124)
         elapsed = time.monotonic() - started
-        self.assertGreater(elapsed, 0.45)
+        self.assertGreater(elapsed, 0.3)
         self.assertLess(elapsed, 5)
 
     def test_synchronous_delegate_extends_waiting_parent(self):
@@ -222,9 +217,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from tauceti_worker import round_activity as a
+a.POLL_INTERVAL=.05
 state=Path(sys.argv[1])
 cfg=SimpleNamespace(state=state,checkout=state/'checkout',wid='test')
-with patch.object(a.Config,'resolve',return_value=cfg), patch.object(a,'self_argv',return_value=[sys.executable,'-c',{CHILD!r},str(state),'orphan']):
+with patch.object(a.Config,'resolve',return_value=cfg), patch('tauceti_worker.round.self_argv',return_value=[sys.executable,'-c',{CHILD!r},str(state),'orphan']):
     a.supervise([],30)
 """
         supervisor = subprocess.Popen([sys.executable, "-c", driver, str(self.state)])

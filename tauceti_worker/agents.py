@@ -828,7 +828,6 @@ def run_agent_proc(
             bufsize=1,
         )
         assert proc.stdout is not None
-        activity = None
         try:
             activity = Activity(proc.pid)
             for line in proc.stdout:
@@ -842,8 +841,6 @@ def run_agent_proc(
             raise
         finally:
             proc.stdout.close()
-            if activity is not None:
-                activity.finish()
         rc = proc.wait()
         if provider in {"codex", "claude"} and not renderer.active:
             write_rendered(destination, f"[warning] no structured {provider} events were recognized\n")

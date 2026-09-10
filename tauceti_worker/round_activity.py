@@ -1,4 +1,4 @@
-"""Opt-in round supervision using round.lock and the existing runtime status channel.
+"""Round supervision using round.lock and the existing runtime status channel.
 
 Only structural process identities and activity times are persisted. A heartbeat is
 not progress. Missing activity permits timeout, never concurrent checkout reuse.
@@ -19,11 +19,11 @@ import uuid
 from pathlib import Path
 
 from .config import Config, Die, log
-from .paths import self_argv, self_env
 from .runtime_status import STATUS_ENV, atomic_json, read_json
 
 TOKEN_ENV = "TAUCETI_ROUND_INSTANCE"
 LOCK_ENV = "TAUCETI_ROUND_LOCK_FD"
+POLL_INTERVAL = 2  # Internal sampling cadence, not a timeout policy setting.
 
 
 def processes() -> dict[str, dict]:
@@ -33,7 +33,7 @@ def processes() -> dict[str, dict]:
     snapshots raise; they never certify cleanup. Zombies no longer access a checkout.
     """
     result = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,pgid=,stat=,time=,lstart="],
+        ["ps", "-axo", "pid=,ppid=,pgid=,stat=,lstart="],
         capture_output=True,
         text=True,
         check=True,
@@ -42,20 +42,16 @@ def processes() -> dict[str, dict]:
     found = {}
     for line in result.stdout.splitlines():
         fields = line.split()
-        if len(fields) != 10:
+        if len(fields) != 9:
             raise ValueError("unrecognized process snapshot")
-        pid, parent, group, state, cpu = fields[:5]
+        pid, parent, group, state = fields[:4]
         if "Z" in state:
             continue
-        days, sep, clock = cpu.partition("-")
-        parts = (clock if sep else days).split(":")
-        seconds = sum(float(part) * 60**i for i, part in enumerate(reversed(parts)))
         found[pid] = {
             "pid": int(pid),
             "parent": int(parent),
             "group": int(group),
-            "birth": " ".join(fields[5:]),
-            "cpu": seconds + (int(days) * 86400 if sep else 0),
+            "birth": " ".join(fields[4:]),
         }
     if str(os.getpid()) not in found:
         raise ValueError("incomplete process snapshot")
@@ -84,8 +80,8 @@ class Activity:
     """Record observed Codex work, including a nested process launched by a wrapper.
 
     Construct immediately after Popen; feed each raw JSON line before rendering it.
-    No-op outside supervised rounds. Duplicates, polling and retry chatter don't
-    refresh progress. Unknown event formats receive quiet grace, not fake progress.
+    No-op outside loop rounds. Duplicates, polling and retry chatter don't
+    refresh progress. Unknown event formats cannot reset the inactivity timer.
     """
 
     def __init__(self, pid: int):
@@ -99,16 +95,7 @@ class Activity:
                 # The subprocess may already have completed. It needs no renewal.
                 self.path = None
                 return
-            now = time.monotonic()
-            update_work(
-                self.path,
-                self.token,
-                lambda w: w["agents"].update(
-                    {
-                        self.pid: {**identity, "started": now, "progress": None, "finished": False},
-                    }
-                ),
-            )
+            update_work(self.path, self.token, lambda w: w["agents"].update({self.pid: identity}))
 
     def observe(self, raw: str) -> None:
         if not self.path:
@@ -146,23 +133,7 @@ class Activity:
             return
         self.seen.add(fingerprint)
         now = time.monotonic()
-        update_work(self.path, self.token, lambda w: w["agents"][self.pid].update(progress=now))
-
-    def finish(self) -> None:
-        if self.path:
-            update_work(self.path, self.token, lambda w: w["agents"][self.pid].update(finished=True))
-
-
-def decision(work: dict, snapshot: dict, now: float, *, fresh: float, quiet: float) -> str:
-    """Three outcomes, independent of lock ownership and cleanup authorization."""
-    agents = [a for a in work.get("agents", {}).values() if not a.get("finished") and alive(a, snapshot)]
-    if any(a.get("progress") is not None and 0 <= now - a["progress"] <= fresh for a in agents):
-        return "progress"
-    # A known pending process can be remote inference or an output-buffered build.
-    # CPU activity alone is not allowed to reset this bounded quiet allowance.
-    if any(0 <= now - (a.get("progress") if a.get("progress") is not None else a["started"]) <= quiet for a in agents):
-        return "quiet-grace"
-    return "expired"
+        update_work(self.path, self.token, lambda w: w.update(progress=now))
 
 
 def descendants(owned: dict, snapshot: dict) -> dict:
@@ -193,13 +164,6 @@ def supervise(argv: list[str], timeout: float) -> int:
     status_path = Path(os.environ.get(STATUS_ENV, cfg.state / "runtime.json"))
     status_path.parent.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
-    poll = max(0.05, float(os.environ.get("TAUCETI_ROUND_ACTIVITY_POLL", "2")))
-    fresh = float(os.environ.get("TAUCETI_ROUND_ACTIVITY_FRESH", "600"))
-    quiet = float(os.environ.get("TAUCETI_ROUND_QUIET_GRACE", "1800"))
-    extension = max(poll, float(os.environ.get("TAUCETI_ROUND_EXTENSION", "300")))
-    term_grace = max(0, float(os.environ.get("TAUCETI_ROUND_TERM_GRACE", "5")))
-    if not 0 <= fresh <= quiet:
-        raise Die("round activity freshness must be nonnegative and no longer than quiet grace")
     with (cfg.state / "round.lock").open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -209,13 +173,12 @@ def supervise(argv: list[str], timeout: float) -> int:
         # Reuse the status writer's lock; unrelated manager heartbeat fields survive.
         from .runtime_status import update_status
 
-        update_status(
-            status_path, round_work={"token": token, "agents": {}, "owned": {}, "checkout": str(cfg.checkout)}
-        )
-        env = self_env({**os.environ, STATUS_ENV: str(status_path), TOKEN_ENV: token, LOCK_ENV: str(lock.fileno())})
-        child = subprocess.Popen(self_argv("_round", *argv), start_new_session=True, pass_fds=(lock.fileno(),), env=env)
+        update_status(status_path, round_work={"token": token, "agents": {}, "owned": {}, "progress": time.monotonic()})
+        from .round import spawn_round
+
+        env = {**os.environ, STATUS_ENV: str(status_path), TOKEN_ENV: token, LOCK_ENV: str(lock.fileno())}
+        child = spawn_round(argv, env=env, pass_fds=(lock.fileno(),))
         owned = {}
-        deadline = time.monotonic() + timeout
         rc = None
 
         def sample():
@@ -238,24 +201,20 @@ def supervise(argv: list[str], timeout: float) -> int:
                     owned.setdefault(pid, identity)
             owned = descendants(owned, current)
             update_work(status_path, token, lambda w: w.update(owned=owned))
-            return work, current
+            return work
 
         try:
             while child.poll() is None:
-                work, snapshot = sample()
+                work = sample()
                 # A snapshot/status write can outlast a child's final output. Prefer
-                # its real exit status to a timeout inferred from finished observers.
+                # its real exit status to an inactivity timeout.
                 if child.poll() is not None:
                     break
-                now = time.monotonic()
-                if now >= deadline:
-                    reason = decision(work, snapshot, now, fresh=fresh, quiet=quiet)
-                    if reason == "expired":
-                        rc = 124
-                        break
-                    log(f"round deadline extended by {extension:g}s: {reason}")
-                    deadline = now + extension
-                time.sleep(poll)
+                if time.monotonic() - work["progress"] >= timeout:
+                    log(f"round idle for {timeout:g}s — stopping owned work")
+                    rc = 124
+                    break
+                time.sleep(POLL_INTERVAL)
             if rc is None:
                 rc = child.wait()
         finally:
@@ -268,7 +227,7 @@ def supervise(argv: list[str], timeout: float) -> int:
                     sample()
                     if not owned:
                         break
-                    sig = signal.SIGTERM if time.monotonic() - cleanup_started < term_grace else signal.SIGKILL
+                    sig = signal.SIGTERM if time.monotonic() - cleanup_started < 5 else signal.SIGKILL
                     for identity in owned.values():
                         # Recheck birth immediately before a targeted signal.
                         if alive(identity, processes()):
@@ -281,7 +240,7 @@ def supervise(argv: list[str], timeout: float) -> int:
                     if not warned:
                         log("round cleanup unverified; retaining checkout lock")
                         warned = True
-                time.sleep(poll)
+                time.sleep(0.05)
             child.wait()
         return rc
 
@@ -294,7 +253,6 @@ def observed_command(argv: list[str]) -> int:
     can keep its existing log. No alternate scheduler or lease is introduced.
     """
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    activity = None
     assert proc.stdout is not None
     try:
         activity = Activity(proc.pid)
@@ -314,8 +272,6 @@ def observed_command(argv: list[str]) -> int:
                 proc.kill()
                 proc.wait()
         proc.stdout.close()
-        if activity is not None:
-            activity.finish()
 
 
 if __name__ == "__main__":

@@ -108,12 +108,13 @@ class RoundContext:
         return False
 
 
-def spawn_round(argv_tail: list[str]) -> subprocess.Popen:
+def spawn_round(argv_tail: list[str], **popen_options) -> subprocess.Popen:
     """Spawn one round as a child in its OWN session (so the loop can kill the whole group). Invokes
     the current interpreter directly on this file (NOT via the uv shebang) to avoid a uv wrapper
     process between the loop and the round — sys.executable is already the uv-resolved interpreter."""
     cmd = self_argv("_round", *argv_tail)
-    return subprocess.Popen(cmd, start_new_session=True, env=self_env())
+    popen_options["env"] = self_env(popen_options.get("env"))
+    return subprocess.Popen(cmd, start_new_session=True, **popen_options)
 
 
 def signal_group(pgid: int, sig: int) -> str:
@@ -335,32 +336,7 @@ def cmd_heartbeat(args) -> int:
 
 
 def run_round_subprocess(argv_tail: list[str], timeout: int = ROUND_TIMEOUT) -> int:
-    """Run one round as a child under a hard timeout; tear down the group on expiry. Used by the loop.
-    Maps a timed-out round to rc 124, a SIGKILL-after-grace to 137 (matching the shell's `timeout`)."""
-    if os.environ.get("TAUCETI_EXTEND_ACTIVE_ROUNDS") == "1":
-        from .round_activity import supervise
+    """Run a round until completion or inactivity; retain exclusion through cleanup."""
+    from .round_activity import supervise
 
-        return supervise(argv_tail, timeout)
-    p = spawn_round(argv_tail)
-    pgid = p.pid  # spawn_round's start_new_session ⇒ the round leads its own group; pgid == leader pid
-    try:
-        return p.wait(timeout)
-    except subprocess.TimeoutExpired:
-        log(f"round timed out after {timeout}s — tearing down")
-        kill_round_group(p)
-        rc = p.returncode
-        return 137 if rc is not None and rc < 0 and -rc == signal.SIGKILL else 124
-    except KeyboardInterrupt:
-        kill_round_group(p)
-        raise
-    finally:
-        # Even a round that exits 0 can leave the agent's backgrounded build-waiters alive; the timeout
-        # path's kill_round_group never runs for it. Sweep the group on EVERY exit so a leaked poll-loop
-        # lives at most one round, not forever (a no-op once kill_round_group already cleared the group).
-        # Unlike kill_round_group (which signals while the leader PID is still live), p.wait() has already
-        # reaped the leader here, so the group is held open only by stragglers. The lone wrong-kill window
-        # — the freed leader PID being reused AND the reuser making itself a group leader before this line
-        # — is microseconds wide and needs a deliberate setsid; we accept it. (One-shot `tauceti work`
-        # runs the round in-process, not through here, so it is not swept; only the unbounded --loop leak
-        # is operationally damaging, so that scope gap is acceptable.)
-        reap_round_group(pgid)
+    return supervise(argv_tail, timeout)
