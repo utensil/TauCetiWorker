@@ -54,10 +54,11 @@ bash scripts/lint-env.sh
 Iterate until every one is green. A green `lake build` alone is NOT enough — the `build` check also
 fails on an axiom-audit, module-system, or lint-env violation (e.g. a missing docstring). Never push red.
 
-Run each command synchronously in a single foreground shell invocation with a generous timeout. Do
-not use the interactive `write_stdin`/session-polling tool for a long-running cache, build, or audit
-command: its transient process handle can disappear before the result is returned. If a tool call
-yields a session id anyway, rerun the command with a longer foreground timeout rather than polling it.
+Launch each verification command once in the foreground, with a generous timeout. If the tool
+yields a session id, poll that same session until it finishes; do not launch a duplicate build or
+audit. If the session handle is lost, inspect the process and its result before proceeding, and do
+not restart the command until the prior process is known to have ended. Require a successful
+terminal result for every verification command before committing or pushing.
 
 **Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
 
