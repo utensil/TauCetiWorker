@@ -23,7 +23,7 @@ lake exe axioms
 
 ## Rules of the repo (hard constraints)
 - Adapt code under `TauCeti/`. Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds every module under `TauCeti/` without it. The only files outside `TauCeti/` you may leave changed are the pins the bot already bumped. Do NOT touch `Scripts/`, `.github/`, or the lakefile (`lakefile.toml`/`lakefile.lean`).
-- Everything under `namespace TauCeti`.
+- Use `namespace TauCeti` for project-specific declarations. When extending an existing Mathlib type, place its operations and associated API in that type's existing namespace (for example, root `ContMDiffMap`) so receiver dot notation works. Do not nest that namespace under `TauCeti` or add compatibility aliases solely to keep the old namespace. Preserve valid type-namespace placement during CI fixes, rebases, and toolchain bumps.
 - **Never write to the roadmaps.** Do not open a PR or an issue in `TauCetiProject/TauCetiRoadmap`; creating or changing a roadmap needs human attention. If your work needs one, say so in your report and stop.
 - Must end green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and never silence a linter (e.g. with `set_option ... false`) to force the build green.
 
