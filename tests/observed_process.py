@@ -53,12 +53,18 @@ class ObservedProcessTests(unittest.TestCase):
         return stdout
 
     def test_productive_single_command_renews_before_command_completion(self):
+        status = read_json(self.path)
+        caller = str(os.getpid())
+        status["round_work"]["agents"] = {caller: processes()[caller], "0": {"pid": 0, "birth": "exited"}}
+        atomic_json(self.path, status)
         p = self.start("import time; [(print('built module',i,flush=True),time.sleep(.15)) for i in range(12)]")
         time.sleep(0.9)
         self.assertIsNone(p.poll())
         work = read_json(self.path)["round_work"]
         self.assertGreater(work["progress"], self.before + 0.3)
         self.assertTrue(work["agents"])
+        self.assertIn(caller, work["agents"])
+        self.assertNotIn("0", work["agents"])
         self.assertIn(b"built module 11", self.finish(p, 0))
         self.assertNotIn("built module", self.path.read_text())
 
