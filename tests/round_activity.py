@@ -43,6 +43,10 @@ with RoundContext(SimpleNamespace(state=state,wid='test')):
         from tauceti_worker.round_activity import observed_command
         command="import json,time;[(print(json.dumps({'type':'item.completed','item':{'type':'command_execution','command':'inspect '+str(i),'exit_code':0,'aggregated_output':str(i)}}),flush=True),time.sleep(.07)) for i in range(10)]"
         observed_command([sys.executable,'-c',command])
+    elif mode=='validation':
+        from tauceti_worker.observed_process import run
+        command="import time;[(print('built',i,flush=True),time.sleep(.07)) for i in range(15)]"
+        assert run([sys.executable,'-c',command],idle_seconds=.5,max_seconds=5)==0
     elif mode in ('escaped','orphan'):
         p=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(10)'],start_new_session=True)
         Activity(p.pid)
@@ -136,6 +140,12 @@ class ActivityTests(unittest.TestCase):
         started = time.monotonic()
         self.assertEqual(self.run_round("progress"), 0)
         self.assertGreater(time.monotonic() - started, 0.7)
+        self.assertFalse(read_json(self.path)["round_work"]["owned"])
+
+    def test_single_validation_command_extends_native_round(self):
+        started = time.monotonic()
+        self.assertEqual(self.run_round("validation", timeout=0.5), 0)
+        self.assertGreater(time.monotonic() - started, 1)
         self.assertFalse(read_json(self.path)["round_work"]["owned"])
 
     def test_busy_lock_returns_error_without_replacing_round_then_recovers(self):
