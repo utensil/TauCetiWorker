@@ -62,7 +62,14 @@ def run(argv: list[str], *, idle_seconds: float, max_seconds: float) -> int:
                 owned.setdefault(pid, identity)
         owned = descendants(owned, current)
         if path:
-            update_work(path, token, lambda w: w["agents"].update(owned))
+
+            def register(work):
+                # A large build can launch thousands of short-lived compilers.
+                # Keep the live registrations, not a history of every compiler.
+                work["agents"] = {pid: identity for pid, identity in work["agents"].items() if alive(identity, current)}
+                work["agents"].update(owned)
+
+            update_work(path, token, register)
 
     def observe(line):
         nonlocal last_output
