@@ -440,8 +440,7 @@ def _open_pr_numbers(w: Worker) -> set[int] | None:
 
 def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
     """Capture just enough GitHub state to tell, after the round, whether the agent actually changed
-    anything. Returns None if we can't snapshot — then the guard is skipped (never block a real
-    success on a flaky query)."""
+    anything. Unknown GitHub state cannot establish publication."""
     if c.pr:
         st = w.gh.pr_progress_state(c.pr)  # head + comment count in one GraphQL call
         if st is None:
@@ -451,31 +450,31 @@ def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
     return {"prs": nums} if nums is not None else None
 
 
-def _progressed(w: Worker, c: Candidate, pre: dict | None) -> bool:
-    """True if the round left an observable mark (push / new PR / new issue-or-review comment).
-    Conservative: any query failure or ambiguity returns True, so we never falsely discard real work."""
+def _progressed(w: Worker, c: Candidate, pre: dict | None, *, bubble: bool = False) -> bool:
+    """Require a remote publication change; for host work, match the existing checkout HEAD.
+
+    Publication is not review acceptance.
+    Comments and unavailable queries cannot establish progress.
+    """
     if pre is None:
-        return True
+        return False
+    local_head = None if bubble else _checkout_head(w.cfg)
+    if not bubble and not local_head:
+        return False
     if c.pr:
         st = w.gh.pr_progress_state(c.pr)
         if st is None:
-            return True
-        return (st["head"] or "") != pre["head"] or st["ncomments"] > pre["ncomments"]
+            return False
+        head = st["head"] or ""
+        return bool(head and head != pre["head"] and (bubble or head == local_head))
     now = _open_pr_numbers(w)
     if now is None:
-        return True
-    new = now - pre["prs"]
-    if not new:
         return False
-    # A new PR appeared — but only one carrying a tauceti-target marker is THIS round's authoring work.
-    # An unrelated/human PR (or, under multi-worker, another worker's concurrent PR) that shows up
-    # mid-round must not mask this round's no-op. Conservative: if we can't read a body, assume ours.
-    for num in new:
-        v = w.gh.pr_view(num, ["body"])
-        if v is None:
-            return True
-        if TARGET_MARKER_RE.search(v.get("body") or ""):
-            return True
+    for num in now - pre["prs"]:
+        v = w.gh.pr_view(num, ["body", "headRefOid"])
+        if v and TARGET_MARKER_RE.search(v.get("body") or ""):
+            if bubble or v.get("headRefOid") == local_head:
+                return True
     return False
 
 
@@ -612,15 +611,12 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
         # target branch.  Comparing against the shared checkout HEAD from before dispatch would
         # count every path between two different PRs when the loop alternates targets.
         log_round_file_changes(w.cfg, w.rc.change_base_head)
-    # A model round that exits 0 but leaves no mark on GitHub did no real work. Usually benign: another
-    # worker pushed the branch first and safe-push declined rather than clobber, or the agent chose not
-    # to act. Surface it as no-progress (so the loop backs off) but say so plainly and point at the log.
-    if rc == 0 and stage in PROGRESS_GUARDED and not _progressed(w, c, pre):
+    # Agent exit zero alone cannot establish publication; retain local work on failed readback.
+    if rc == 0 and stage in PROGRESS_GUARDED and not _progressed(w, c, pre, bubble=bubble):
         tgt = f" #{c.pr}" if c.pr else ""
         raise NoProgress(
-            f"{stage}{tgt}: the agent finished but nothing landed on GitHub (no push, new PR, or "
-            f"comment). Most often another worker pushed the branch first (safe-push declines rather "
-            f"than clobber) or the agent declined to act — not a failure. Transcript: {w.cfg.logdir}"
+            f"{stage}{tgt}: publication could not be verified. Comments and failed queries do not "
+            f"establish progress. Preserve the candidate and inspect the exact result. Transcript: {w.cfg.logdir}"
         )
     if rc == 0 and stage in {"rebase", "bump", "fix-ci", "fix"} and not bubble:
         p = next((item for item in sv.open_prs if item.number == c.pr), None)

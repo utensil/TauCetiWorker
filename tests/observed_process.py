@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tauceti_worker.round_activity import STATUS_ENV, TOKEN_ENV, processes
-from tauceti_worker.runtime_status import atomic_json, read_json
+from tauceti_worker.runtime_status import atomic_json, read_json, update_status
 
 
 class ObservedProcessTests(unittest.TestCase):
@@ -126,7 +126,9 @@ class ObservedProcessTests(unittest.TestCase):
         p = self.start("import time;[(print(i,flush=True),time.sleep(.1)) for i in range(100)]")
         time.sleep(0.4)
         identities = read_json(self.path)["round_work"]["agents"]
-        atomic_json(self.path, {"round_work": {"token": "replacement", "agents": {}, "progress": 123}})
+        # Match the supervisor: replacing a round must share the observer writer's
+        # lock, or an in-flight old-token write can overwrite this test setup.
+        update_status(self.path, round_work={"token": "replacement", "agents": {}, "progress": 123})
         self.finish(p, 1)
         self.assertEqual(read_json(self.path)["round_work"]["progress"], 123)
         self.assertFalse(set(identities) & set(processes()))

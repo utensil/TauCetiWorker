@@ -54,6 +54,6 @@ echo "git-safe-push: $REMOTE HEAD:$REF (--force-with-lease=$REF:${EXPECT:-<creat
 if git push --force-with-lease="$REF:$EXPECT" "$REMOTE" "HEAD:$REF"; then
     exit 0
 fi
-die "push rejected — the branch '$REF' moved since checkout (a concurrent push), or it already exists.
-This is the safety mechanism working: we did NOT overwrite anyone. Re-sync to the current head and retry
-next round; do not retry a plain 'git push'."
+die "push failed; inspect Git's diagnostic above. Permission or transport failures do not establish
+a branch race. Preserve the candidate, verify the destination and remote head, and do not retry
+a plain 'git push'."

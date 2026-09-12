@@ -201,6 +201,32 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
         check("proven recovery metadata cleared", meta_path.exists(), False)
 
         local = git(checkout, "rev-parse", "HEAD", capture=True).stdout.strip()
+        pre = {"head": public, "ncomments": 0}
+        check("changed remote matches local candidate", wu._progressed(worker, candidate, pre), True)
+        check("missing initial query is not progress", wu._progressed(worker, candidate, None), False)
+        for result in (None, {"head": public, "ncomments": 100}, {"head": "c" * 40, "ncomments": 100}):
+            with patch.object(github, "pr_progress_state", return_value=result):
+                check(
+                    "unknown, comments or peer head is not host publication",
+                    wu._progressed(worker, candidate, pre),
+                    False,
+                )
+        with patch.object(wu, "_open_pr_numbers", return_value={1}):
+            for result, expected in (
+                (None, False),
+                ({"body": "no marker", "headRefOid": local}, False),
+                ({"body": "<!--tauceti-target:v1 {}-->", "headRefOid": public}, False),
+                ({"body": "<!--tauceti-target:v1 {}-->", "headRefOid": local}, True),
+            ):
+                with patch.object(github, "pr_view", return_value=result, create=True):
+                    check(
+                        "new PR requires marker and local head",
+                        wu._progressed(worker, wu.Candidate(0, "", "roadmap"), {"prs": set()}),
+                        expected,
+                    )
+        with patch.object(wu, "_checkout_head", side_effect=AssertionError("Bubble has no host checkout")):
+            check("Bubble uses remote publication", wu._progressed(worker, candidate, pre, bubble=True), True)
+
         fresh = wu.Candidate(77, local, "fresh public head")
         clean_kinds = Kinds([other, fresh])
         clean_kinds.open_prs = [SimpleNamespace(**{**vars(pr), "head_oid": local})]

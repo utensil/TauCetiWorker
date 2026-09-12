@@ -86,7 +86,7 @@ wu.do_review = fake_stage
 wu.do_fix = fake_stage
 wu.warn_red = lambda msg: warns.append(msg)
 wu._progress_snapshot = lambda w, c: None
-wu._progressed = lambda w, c, pre: True  # stub out the "nothing landed on GitHub" guard
+wu._progressed = lambda w, c, pre, **kwargs: True  # stub out the "nothing landed on GitHub" guard
 
 
 def reset():

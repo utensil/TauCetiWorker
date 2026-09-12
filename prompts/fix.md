@@ -8,7 +8,9 @@ Quote every complete URL passed to `gh api` (for example `gh api 'repos/OWNER/RE
   - `gh pr view __PR__ --repo TauCetiProject/TauCeti --json comments`
   - `gh api "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments?per_page=100"` (the per-rubric review threads; each root carries a `<!--tauceti-rubric:NAME-->` marker, and the finding text + suggested fix). Keep the complete URL quoted; in zsh an unquoted `?` is a filename glob.
 - Reconcile review rounds by the head and rubric revision they evaluated and the subsequent decisions/replies. Identify current blockers (⛔ or 🟡), applicable approvals (✅), unresolved earlier findings, and findings explicitly resolved or superseded. An absent or unevaluated rubric on a partial scoreboard is not approval and does not erase an unresolved finding.
+- Read the PR commit history alongside the review history. For a recurring finding, inspect the prior attempted fix and the response to it; identify why it failed before choosing another edit. A new head alone is not evidence that the finding was resolved.
 - Where review instructions conflict, identify the controlling decision and a coherent repair plan; do not alternate between incompatible suggested patches or invent a resolution that the review history does not support.
+- For an add/remove reversal or incompatible requests across rubrics, link both exact threads and quote the conflicting requirements with their evaluated heads. Preserve any prior adjudication and state what new evidence would justify reversing it. If the published decisions cannot both be satisfied, contest that concrete contradiction and await adjudication instead of undoing the earlier repair silently.
 
 ## Do not regress what is already green
 Preserve the applicable approvals you identified while clearing the unresolved blockers. A change that fixes one blocker but degrades an approved rubric will not converge. So:
@@ -20,10 +22,12 @@ Preserve the applicable approvals you identified while clearing the unresolved b
 - Before editing or replying, briefly state the published head, the unresolved findings and relevant prior attempts/adjudications, and the next concrete action with its acceptance check. After a rejected contest or an attempt that left the same finding unresolved, explain how the next action addresses that feedback; do not repeat the unchanged argument or claim a previous attempt succeeded without evidence.
 - Prefer a corrective code change within the authorized scope when the rejection identifies a valid defect. Repeat a contest only with materially new evidence or an explicit changed decision, and directly answer the reason for rejection. If a real scope or review-contract contradiction prevents a valid next action, report the precise decision needed and preserve the candidate. A no-change attempt by itself is not an attempt ceiling or a reason to abandon the target.
 - For a repair that changes a mathematical representation or its operations, map its relevant fields to existing Mathlib/library representations before inventing replacements, and check the intended interpretation with a proportionate witness or preservation law capable of exposing the reported defect. Compilation and self-consistent operation laws alone do not establish that interpretation; a routine proof or naming fix does not require a new model or witness framework.
+- Check completion against every current requested deliverable. Removing a documentation promise does not satisfy a separate API request to implement the promised theorem. Report such a request as unresolved unless you implement it or obtain an explicit adjudication that supersedes it.
 
 ## Decide, per finding, on its merits
 For each finding, judge whether it is actually correct:
 - **If it is correct**, fix the code. Verify the fix empirically (does it build? does the claimed Mathlib lemma actually exist — `grep`/`#check`? does the suggested `@[simp]` lemma have a variable head, which the linter forbids?). Reviewers are sometimes confidently wrong; do not blindly comply.
+- Before adding or restoring `@[simp]`, run the actual environment lint with all candidate rules active. A locally compiling theorem can still violate `simpNF`; a failed lint driver is an incomplete check, never a pass. When a requested attribute fails, keep the useful theorem without that attribute and contest the attribute request with the exact compiler/linter evidence.
 - **If it is wrong**, do NOT comply. Reply on that rubric's thread explaining why, with evidence (a synth-check, a Mathlib citation, a build error). Post the reply to the thread root:
   `gh api -X POST "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies" -f body="..."`
   (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.) Before making a public claim about code on the PR, re-read the published head and verify the cited declarations/behavior at that exact head; identify any evidence from an unpublished local candidate explicitly.
@@ -34,11 +38,16 @@ For each finding, judge whether it is actually correct:
 - **Never write to the roadmaps.** Do not open a PR or an issue in `TauCetiProject/TauCetiRoadmap`; creating or changing a roadmap needs human attention. If a finding means the PR's target is not on any roadmap, say so in your report and stop.
 - Must stay green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and **never silence a linter** (e.g. with `set_option ... false`) to force a change through — that is itself a reason to push back on the finding.
 
-## Verify before pushing (all three MUST pass)
+## Verify before pushing (all commands MUST pass)
 ```
+set -e
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 lake exe cache get
-lake build
+lake build --iofail
 lake exe axioms
+lake exe module-system
+bash scripts/lint-env.sh
+bash scripts/lint-style.sh
 ```
 Iterate until green. Never push red.
 
@@ -49,13 +58,17 @@ not restart the command until the prior process is known to have ended.
 
 **Complete the active round synchronously.** Run these commands in the FOREGROUND and wait for each to finish; do not leave an unobserved background build. Commit and safely publish verified fixes when possible. If interrupted or blocked, preserve the local candidate and report the unfinished step and observed result; do not discard useful work or claim an unverified check or publication succeeded. Pushing updates the PR; local work may remain unpublished and must not be treated as disposable.
 
+A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
+
 ## Submit
+Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
+
 - Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:
   ```
   "__BIN__/git-safe-push"
   ```
-  This compare-and-swaps the PR branch against the head you started from, so a concurrent agent's work is never silently clobbered. Do NOT run a raw `git push` (nor `git push --force` / `--force-with-lease`); the wrapper is the only sanctioned push. If it reports the branch moved or the lease was lost, another agent pushed — STOP and say so in your report (the next round re-syncs and retries); do not work around it. A successful push updates the PR; a re-review runs separately.
+  This compare-and-swaps the PR branch against the head you started from, so a concurrent agent's work is never silently clobbered. Do NOT run a raw `git push` (nor `git push --force` / `--force-with-lease`); the wrapper is the only sanctioned push. If it reports the branch moved or the lease was lost, publication is blocked — STOP and say so in your report (the next round re-syncs and retries); do not work around it. A successful push updates the PR; a re-review runs separately.
 - Do NOT open a new PR; do NOT touch other files.
 
 ## Report
