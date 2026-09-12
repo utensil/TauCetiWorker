@@ -70,6 +70,7 @@ beats a padded one. If nothing needs changing, say so and move on. Then verify, 
 ## Verify before pushing (all commands MUST pass)
 ```
 set -e
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 lake exe cache get
 lake build --iofail
 lake exe axioms

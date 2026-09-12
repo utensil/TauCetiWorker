@@ -40,6 +40,7 @@ For each finding, judge whether it is actually correct:
 ## Verify before pushing (all commands MUST pass)
 ```
 set -e
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 lake exe cache get
 lake build --iofail
 lake exe axioms
