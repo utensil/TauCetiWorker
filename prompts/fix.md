@@ -32,6 +32,16 @@ For each finding, judge whether it is actually correct:
   `gh api -X POST "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies" -f body="..."`
   (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.) Before making a public claim about code on the PR, re-read the published head and verify the cited declarations/behavior at that exact head; identify any evidence from an unpublished local candidate explicitly.
 
+## Discussion-only rounds
+If the next action is only an evidence-backed reply or a report of a review-contract contradiction,
+verify the current published head and inspect the relevant source, review history, and rubric
+revision. Run a focused probe when needed to support a technical claim. An attribution or policy
+dispute does not by itself require a full build, axiom audit, or linter run on unchanged source.
+Do not create an empty commit or push just to complete such a round. If citing existing validation,
+identify its exact head and source; report it as prior evidence, not a fresh check. Preserve and
+identify any unpublished local changes separately. If you make source changes for publication,
+the full verification and safe-push requirements below apply.
+
 ## Rules of the repo (hard constraints)
 - Code goes under `TauCeti/`. Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds every module under `TauCeti/`, so there is no need to touch it (if a reviewer claims your API is not reachable from the root, the glob already covers it). Do NOT touch `Scripts/`, `.github/`, the lakefile (`lakefile.toml`/`lakefile.lean`), or the Lake pins (`lake-manifest.json`/`lean-toolchain`) — the lakefile is human-owned, and forward Mathlib/toolchain bumps are a separate dedicated flow; keep this PR to `TauCeti/`.
 - Use `namespace TauCeti` for project-specific declarations. When extending an existing Mathlib type, place its operations and associated API in that type's existing namespace (for example, root `ContMDiffMap`) so receiver dot notation works. Do not nest that namespace under `TauCeti` or add compatibility aliases solely to keep the old namespace. Preserve valid type-namespace placement during CI fixes, rebases, and toolchain bumps.
@@ -39,6 +49,8 @@ For each finding, judge whether it is actually correct:
 - Must stay green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and **never silence a linter** (e.g. with `set_option ... false`) to force a change through — that is itself a reason to push back on the finding.
 
 ## Verify before pushing (all commands MUST pass)
+Run this gate when publishing source changes. A discussion-only round follows the evidence checks
+above and may finish without running this gate or the Submit section.
 ```
 set -e
 if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
@@ -72,4 +84,10 @@ Keep the Worker-provided push destination and expected head unchanged; do not ov
 - Do NOT open a new PR; do NOT touch other files.
 
 ## Report
-End with a concise summary: which findings you fixed (and how you verified each), which you contested (and the new evidence and response to any prior rejection), remaining findings and the revised next action or precise blocker, and the exact `lake build` / `lake exe axioms` result lines proving green + axiom-clean. Distinguish the published head from an unpublished candidate. Do not claim green unless you saw it.
+End with a concise summary: which findings you fixed (and how you verified each), which you contested
+(and the new evidence and response to any prior rejection), remaining findings, and the revised
+next action or precise blocker. For source publication, include the exact `lake build` /
+`lake exe axioms` results and the other required gate results. For a discussion-only round, state
+that no source was published and report only checks actually run and explicitly identified prior
+evidence; fresh full-build results are not required. Distinguish the published head from an
+unpublished candidate. Do not claim green unless you saw it.
