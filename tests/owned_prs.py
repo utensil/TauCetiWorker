@@ -67,7 +67,7 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
     owned.path.write_text("3\n")
     survey_mod.me = lambda: "alice"
     gh = SimpleNamespace(pr_list=lambda fields: [pr(3), pr(4)])
-    counters = SimpleNamespace(read=lambda name: 0)
+    counters = SimpleNamespace(read=lambda name: 0, fix_pr_attempts=lambda pr: 0)
     sv = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned")
     check("owned survey tends only recorded PRs", [c.pr for c in sv.rebaseable.actionable] == [3])
     check("owned survey backpressure counts only owned PRs", sv.n_mine_open == 1)

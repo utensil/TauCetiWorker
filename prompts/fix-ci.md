@@ -60,15 +60,17 @@ audit. If the session handle is lost, inspect the process and its result before 
 not restart the command until the prior process is known to have ended. Require a successful
 terminal result for every verification command before committing or pushing.
 
-**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). Pushing is the only thing that preserves your work.
+**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
 ## Submit
+If an operator configured a pre-push check, the safe wrapper runs it synchronously against the committed candidate. Wait for its terminal result; do not launch a duplicate validation or bypass a failed check. A failed check or push preserves local work. Diagnose the exact error: permission and transport failures do not establish a concurrent branch update.
+
 - Commit the fix with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:
   ```
   "__BIN__/git-safe-push"
   ```
-  This compare-and-swaps the PR branch against the head you started from, so a concurrent agent's work is never silently clobbered. Do NOT run a raw `git push` (nor `git push --force` / `--force-with-lease`); the wrapper is the only sanctioned push. If it reports the branch moved or the lease was lost, another agent pushed — STOP and say so in your report (the next round re-syncs); do not work around it. A successful push updates the PR; CI re-runs automatically.
+  This compare-and-swaps the PR branch against the head you started from, so a concurrent agent's work is never silently clobbered. Do NOT run a raw `git push` (nor `git push --force` / `--force-with-lease`); the wrapper is the only sanctioned push. If it reports the branch moved or the lease was lost, publication is blocked — STOP and say so in your report (the next round re-syncs); do not work around it. A successful push updates the PR; CI re-runs automatically.
 - Do NOT open a new PR; do NOT touch other files.
 
 ## Report

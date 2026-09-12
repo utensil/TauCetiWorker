@@ -76,7 +76,7 @@ with (
 ):
     cfg = SimpleNamespace(wid="fixture", state=Path(directory) / "state", store_dir=Path(directory) / "store")
     gh = SimpleNamespace(pr_list=lambda _fields: [raw_pr], fresh_claim_age=lambda _cid: None)
-    counters = SimpleNamespace(read=lambda _key: 0)
+    counters = SimpleNamespace(read=lambda _key: 0, fix_pr_attempts=lambda _pr: 0)
     for name, states, verdicts, expected_review, expected_fix in cases:
         rs = FakeRS(states, [{"verdict": verdict} for verdict in verdicts])
         result = survey_module.survey(cfg, gh, rs, counters, deep=True, tend_scope="author")

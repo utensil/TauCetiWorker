@@ -76,7 +76,7 @@ lake exe axioms
 If `lake build` is red, FIX IT or retreat (below). Never push red.
 
 
-**Do this synchronously, in this one turn.** Run the three commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). Pushing is the only thing that preserves your work.
+**Do this synchronously, in this one turn.** Run the three commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
 ## If the target won't close
 Never downgrade to a lookalike: a weakened statement, a degenerate special case, or scaffolding carrying the result's name. Retreat one rung at a time:
@@ -84,6 +84,8 @@ Never downgrade to a lookalike: a weakened statement, a degenerate special case,
 2. If no such piece exists, release your claim and stop without a PR. Do not substitute unrelated or peripheral work merely to produce an artifact.
 
 ## Submit
+If an operator configured a pre-push check, the safe wrapper runs it synchronously against the committed candidate. Wait for its terminal result; do not launch a duplicate validation or bypass a failed check. A failed check or push preserves local work. Diagnose the exact error: permission and transport failures do not establish a concurrent branch update.
+
 You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`): the branch is pushed there, and the PR is opened from your fork to `TauCetiProject/TauCeti:main`. You do not need write access to the canonical repo. (The wrappers are already configured to push to your fork — just run them.)
 - Create a branch `roadmap/<short-slug>-__WORKERID__` off `main` (the `-__WORKERID__` suffix keeps concurrent workers on one account from colliding). Commit with an informative conventional subject (`feat: <subject>`) and a substantive body explaining what changed, why, and the consumer/boundary. Do not add an AI co-author trailer or literal `\\n` escapes.
 - Push the new branch to your fork with the project's safe wrapper — and ONLY the wrapper:

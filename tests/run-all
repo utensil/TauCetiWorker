@@ -60,6 +60,7 @@ RUN_STDLIB=(
   progress_tool_failure_log.py
   productive_continuation.py
   prompt_wrapper_paths.py
+  publication.py
   provider_usage.py
   quota_auto_refresh.py
   quota_cache_fp.py

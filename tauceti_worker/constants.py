@@ -22,9 +22,9 @@ CLAIMS = "TauCetiProject/tauceti-claims"
 
 
 # Per-PR budgets (the owned fix override deliberately removes only the fix ceiling).
-MAX_FIX_ATTEMPTS = 3  # per-head: stop re-running the fixer on a commit it can't change (a stuck
+MAX_FIX_ATTEMPTS = 3  # per-head: stop re-running the fixer on a commit it cannot change
+MAX_FIX_PR_ATTEMPTS = 5  # across heads: a push must not replenish an endless review-repair budget
 
-# head never advances a review round, so CI's round cap can't catch it).
 # The review-ROUND budget lives in CI now (TauCeti housekeeping closes a PR reviewed to its cap while
 # still blocking). The worker no longer caps its own review rounds — it keeps reviewing on every new
 # head until the PR merges or CI closes it — so every PR reaches a terminal state.

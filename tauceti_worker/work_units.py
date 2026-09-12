@@ -440,8 +440,7 @@ def _open_pr_numbers(w: Worker) -> set[int] | None:
 
 def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
     """Capture just enough GitHub state to tell, after the round, whether the agent actually changed
-    anything. Returns None if we can't snapshot — then the guard is skipped (never block a real
-    success on a flaky query)."""
+    anything. None means unknown; it cannot establish successful publication."""
     if c.pr:
         st = w.gh.pr_progress_state(c.pr)  # head + comment count in one GraphQL call
         if st is None:
@@ -452,29 +451,34 @@ def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
 
 
 def _progressed(w: Worker, c: Candidate, pre: dict | None) -> bool:
-    """True if the round left an observable mark (push / new PR / new issue-or-review comment).
-    Conservative: any query failure or ambiguity returns True, so we never falsely discard real work."""
+    """Verify this checkout's publication, not unrelated head/comment activity.
+
+    Publication is not review acceptance and never refunds repair attempts. A
+    contest can be pending without being progress; survey handles that wait.
+    Unknown GitHub state backs off while preserving the candidate.
+    """
     if pre is None:
-        return True
+        return False
+    published = pre.get("published_head", "")
     if c.pr:
         st = w.gh.pr_progress_state(c.pr)
         if st is None:
-            return True
-        return (st["head"] or "") != pre["head"] or st["ncomments"] > pre["ncomments"]
+            return False
+        head = st["head"] or ""
+        return bool(head and head != pre["head"] and head == published)
     now = _open_pr_numbers(w)
     if now is None:
-        return True
+        return False
     new = now - pre["prs"]
     if not new:
         return False
     # A new PR appeared — but only one carrying a tauceti-target marker is THIS round's authoring work.
-    # An unrelated/human PR (or, under multi-worker, another worker's concurrent PR) that shows up
-    # mid-round must not mask this round's no-op. Conservative: if we can't read a body, assume ours.
+    # An unrelated PR appearing mid-round must not mask this round's no-op.
     for num in new:
-        v = w.gh.pr_view(num, ["body"])
+        v = w.gh.pr_view(num, ["body", "headRefOid"])
         if v is None:
-            return True
-        if TARGET_MARKER_RE.search(v.get("body") or ""):
+            continue
+        if published and v.get("headRefOid") == published and TARGET_MARKER_RE.search(v.get("body") or ""):
             return True
     return False
 
@@ -515,6 +519,8 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
     """Perform one stage. Returns its rc, or None if the candidate was claimed by another worker
     (caller tries the next candidate). Dry-run logs the intent and returns 0."""
     bubble = _bubble(stage, opts)
+    if bubble and stage in PROGRESS_GUARDED and os.environ.get("TAUCETI_PRE_PUSH_CHECK"):
+        raise NoProgress("the configured pre-push check requires host authoring; no unchecked Bubble fallback")
     if opts.dry_run:
         target = f"#{c.pr}" if c.pr else (c.head[:12] if c.head else c.reason)
         log(
@@ -606,21 +612,41 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
     log(f"→ {stage.upper()}: {what}   [{detail}]")
     report_runtime("running", phase=stage, target=what, detail=detail, next_action_at=None)
     pre = _progress_snapshot(w, c) if stage in PROGRESS_GUARDED else None
-    rc = fn(w, sv, c, opts, bubble)
+    receipt = None
+    old_receipt = os.environ.get("TAUCETI_PUBLISHED_HEAD_FILE")
+    if stage in PROGRESS_GUARDED:
+        inbox = w.cfg.state / "publish-inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        receipt = inbox / f"{os.getpid()}-{time.time_ns()}.txt"
+        os.environ["TAUCETI_PUBLISHED_HEAD_FILE"] = str(receipt)
+    try:
+        rc = fn(w, sv, c, opts, bubble)
+    finally:
+        if receipt is not None:
+            try:
+                heads = receipt.read_text().splitlines()
+            except OSError:
+                heads = []
+            if pre is not None:
+                pre["published_head"] = heads[-1] if heads and re.fullmatch(r"[0-9a-f]{40,64}", heads[-1]) else ""
+            receipt.unlink(missing_ok=True)
+        if old_receipt is None:
+            os.environ.pop("TAUCETI_PUBLISHED_HEAD_FILE", None)
+        else:
+            os.environ["TAUCETI_PUBLISHED_HEAD_FILE"] = old_receipt
     if stage in FILE_CHANGE_STAGES and not bubble:
         # The work unit records its baseline immediately after it has prepared and selected the
         # target branch.  Comparing against the shared checkout HEAD from before dispatch would
         # count every path between two different PRs when the loop alternates targets.
         log_round_file_changes(w.cfg, w.rc.change_base_head)
-    # A model round that exits 0 but leaves no mark on GitHub did no real work. Usually benign: another
-    # worker pushed the branch first and safe-push declined rather than clobber, or the agent chose not
-    # to act. Surface it as no-progress (so the loop backs off) but say so plainly and point at the log.
+    # Agent exit zero alone cannot establish publication. Back off on unverified results
+    # while retaining local work and pointing at the transcript for reconciliation.
     if rc == 0 and stage in PROGRESS_GUARDED and not _progressed(w, c, pre):
         tgt = f" #{c.pr}" if c.pr else ""
         raise NoProgress(
-            f"{stage}{tgt}: the agent finished but nothing landed on GitHub (no push, new PR, or "
-            f"comment). Most often another worker pushed the branch first (safe-push declines rather "
-            f"than clobber) or the agent declined to act — not a failure. Transcript: {w.cfg.logdir}"
+            f"{stage}{tgt}: publication of this checkout's candidate could not be verified. "
+            f"Comments, peer pushes, and failed queries do not establish progress. The candidate "
+            f"is preserved; inspect the exact result before retrying. Transcript: {w.cfg.logdir}"
         )
     if rc == 0 and stage in {"rebase", "bump", "fix-ci", "fix"} and not bubble:
         p = next((item for item in sv.open_prs if item.number == c.pr), None)

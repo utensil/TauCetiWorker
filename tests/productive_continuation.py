@@ -150,7 +150,13 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
         git(checkout, "add", "tracked.txt", "new.txt")
         git(checkout, "commit", "-qm", "continue candidate")
         check("push CAS stays at admitted public head", os.environ.get("TAUCETI_PUSH_EXPECT"), public)
-        git(checkout, "push", "-q", "origin", "HEAD:topic")
+        subprocess.run(
+            [str(REPO / "scripts/git-safe-push"), "topic"],
+            cwd=checkout,
+            env={**os.environ, "TAUCETI_PUSH_REMOTE": str(remote), "TAUCETI_CLAIM_KEY": ""},
+            check=True,
+            capture_output=True,
+        )
         return 0
 
     try:
