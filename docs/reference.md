@@ -11,7 +11,7 @@ list is in `tauceti work -h`. For persistent workers, see
 | `--loop` | Run the driver: keep doing rounds, pacing against quota between them, instead of one. |
 | `--only TASKS` | Restrict the round to a comma list of `rebase,bump,progress,fix-ci,fix,review,roadmap` (default: the whole cascade). |
 | `--tend-scope {author,owned}` | Maintenance PR scope. `author` is legacy author-wide behavior; `owned` tends only PRs recorded for this worker id (fail-closed when its local record is absent or invalid). |
-| `--retry-exhausted-fixes` | Remove the per-head and per-PR attempt ceilings for blocking fixes; requires `--tend-scope owned` and is inherited by loop rounds. |
+| `--retry-exhausted-fixes` | Remove the default three-per-head and five-per-PR attempt ceilings for blocking fixes; requires `--tend-scope owned` and is inherited by loop rounds. |
 | `--skip TASKS` | Drop a comma list of tasks from the cascade. Combines with `--only` by subtraction. |
 | `--agent AGENT` | `auto` (default), `codex`, `claude`, `kiro`, `deepseek`, or `minimax`. Kiro and OpenRouter providers are explicit-only and unpaced. |
 | `--author-model MODEL` | Exact authoring model for an explicit provider (CLI > provider environment > committed default). |
@@ -169,7 +169,6 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `CODEX_HOME` | `~/.codex` | Codex config/credential source. Point it at a private directory to give TauCeti its own Codex account without disturbing the one your interactive `codex` uses. |
 | `TAUCETI_WORKER_ID` | _(unset)_ | Pin the id; when unset, `work` takes the lowest free `workerN`. |
 | `TAUCETI_FORK` | auto-created | Point at an existing fork instead of the one the worker creates. |
-| `TAUCETI_PRE_PUSH_CHECK` | _(unset)_ | Absolute executable for host publication validation; nonzero/missing checks block the safe push. A configured host check forbids unchecked Bubble authoring. See [publication checks](publication.md). |
 | `TAUCETI_ROADMAP_ONLY` | _(unset)_ | The single roadmap area for `--roadmap-only`. Unset = a fresh random area each round (falls back to all areas if the list can't be fetched); `""` = all areas. |
 | `TAUCETI_ROADMAP_SKIP` | _(unset)_ | Comma-separated roadmap areas to exclude, for `--roadmap-skip`. |
 | `TAUCETI_ROADMAP_EXTRA_IDENTITIES` | _(unset)_ | Comma-separated extra GitHub logins whose claimed intentions count as the worker's own. |

@@ -678,9 +678,6 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
     if os.environ.get("TAUCETI_AGENT_ECHO"):
         print(f"HOST cwd={cwd}\n  " + " ".join(_shq(a) for a in argv))
         return 0
-    from .publication import bind_publication
-
-    bind_publication(cwd)
     return run_agent_proc(
         argv,
         env=env,
@@ -1428,9 +1425,6 @@ def run_in_bubble(
     _bubble_pop(cfg, env)  # clear any container a SIGKILLed prior round left behind
 
     mount_flags = ["--mount", f"{rounddir}:/opt/round:ro"]
-    publication_receipt = os.environ.get("TAUCETI_PUBLISHED_HEAD_FILE")
-    if publication_receipt:
-        mount_flags += ["--mount", f"{Path(publication_receipt).parent}:/opt/publish-inbox:rw"]
     for m in mounts or []:
         mount_flags += ["--mount", m]
 
@@ -1446,8 +1440,6 @@ def run_in_bubble(
     # CONTAINER PATH inside bubble's bash -lc. We do NOT forward TAUCETI_CLAIM_* (the claim+heartbeat
     # are host-side; the branch CAS is the [HARD] guarantee and needs no in-container claim).
     tcenv = "env PATH=/opt/round:$PATH"
-    if publication_receipt:
-        tcenv += " TAUCETI_PUBLISHED_HEAD_FILE=" + shlex.quote("/opt/publish-inbox/" + Path(publication_receipt).name)
     for var in (
         "TAUCETI_PUSH_REF",
         "TAUCETI_PUSH_EXPECT",

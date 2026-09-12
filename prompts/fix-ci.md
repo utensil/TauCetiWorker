@@ -8,6 +8,7 @@ You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an 
 - Reproduce locally — this is the source of truth, not the log alone. The single `build` check bundles
   the sandboxed build, the audits, and the lint, so run the WHOLE suite, not just `lake build`:
   ```
+  set -e
   lake exe cache get
   git fetch -q origin main
   shim_args=(--fail-on-available); base_shims="$(mktemp)"; base_root="$(mktemp -d)"; have_base=0
@@ -16,10 +17,11 @@ You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an 
   if [ "$have_base" = 1 ] && git diff --quiet "$base_ref" -- lake-manifest.json lean-toolchain; then shim_args+=(--only-new); fi
   if [ -f scripts/check-expired-mathlib-shims.py ]; then python3 scripts/check-expired-mathlib-shims.py "${shim_args[@]}"; fi
   rm -f "$base_shims"; rm -rf "$base_root"
-  lake build
+  lake build --iofail
   lake exe axioms
   lake exe module-system
   bash scripts/lint-env.sh
+  bash scripts/lint-style.sh
   ```
   If `lint-env` flags a declaration that is NOT in your diff, your branch is likely behind main (CI
   overlays your `TauCeti/` onto current main): merge `main` into the branch and re-check.
@@ -38,6 +40,7 @@ You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an 
 
 ## Verify before pushing (ALL of these MUST pass — they are exactly what the `build` check runs)
 ```
+set -e
 lake exe cache get
 git fetch -q origin main
 shim_args=(--fail-on-available); base_shims="$(mktemp)"; base_root="$(mktemp -d)"; have_base=0
@@ -46,10 +49,11 @@ if git show "$base_ref":TauCeti/mathlib-shims.json > "$base_shims" 2>/dev/null; 
 if [ "$have_base" = 1 ] && git diff --quiet "$base_ref" -- lake-manifest.json lean-toolchain; then shim_args+=(--only-new); fi
 if [ -f scripts/check-expired-mathlib-shims.py ]; then python3 scripts/check-expired-mathlib-shims.py "${shim_args[@]}"; fi
 rm -f "$base_shims"; rm -rf "$base_root"
-lake build
+lake build --iofail
 lake exe axioms
 lake exe module-system
 bash scripts/lint-env.sh
+bash scripts/lint-style.sh
 ```
 Iterate until every one is green. A green `lake build` alone is NOT enough — the `build` check also
 fails on an axiom-audit, module-system, or lint-env violation (e.g. a missing docstring). Never push red.
@@ -62,8 +66,10 @@ terminal result for every verification command before committing or pushing.
 
 **Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
+A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
+
 ## Submit
-If an operator configured a pre-push check, the safe wrapper runs it synchronously against the committed candidate. Wait for its terminal result; do not launch a duplicate validation or bypass a failed check. A failed check or push preserves local work. Diagnose the exact error: permission and transport failures do not establish a concurrent branch update.
+Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
 - Commit the fix with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:

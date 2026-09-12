@@ -37,11 +37,15 @@ For each finding, judge whether it is actually correct:
 - **Never write to the roadmaps.** Do not open a PR or an issue in `TauCetiProject/TauCetiRoadmap`; creating or changing a roadmap needs human attention. If a finding means the PR's target is not on any roadmap, say so in your report and stop.
 - Must stay green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and **never silence a linter** (e.g. with `set_option ... false`) to force a change through — that is itself a reason to push back on the finding.
 
-## Verify before pushing (all three MUST pass)
+## Verify before pushing (all commands MUST pass)
 ```
+set -e
 lake exe cache get
-lake build
+lake build --iofail
 lake exe axioms
+lake exe module-system
+bash scripts/lint-env.sh
+bash scripts/lint-style.sh
 ```
 Iterate until green. Never push red.
 
@@ -52,8 +56,10 @@ not restart the command until the prior process is known to have ended.
 
 **Complete the active round synchronously.** Run these commands in the FOREGROUND and wait for each to finish; do not leave an unobserved background build. Commit and safely publish verified fixes when possible. If interrupted or blocked, preserve the local candidate and report the unfinished step and observed result; do not discard useful work or claim an unverified check or publication succeeded. Pushing updates the PR; local work may remain unpublished and must not be treated as disposable.
 
+A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
+
 ## Submit
-If an operator configured a pre-push check, the safe wrapper runs it synchronously against the committed candidate. Wait for its terminal result; do not launch a duplicate validation or bypass a failed check. A failed check or push preserves local work. Diagnose the exact error: permission and transport failures do not establish a concurrent branch update.
+Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
 - Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:

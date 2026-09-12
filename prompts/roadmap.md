@@ -67,24 +67,30 @@ Make only fixes you can justify against a rubric. Do NOT broaden the PR, add spe
 generality, or invent findings to look diligent: scope is itself a rubric, and a sound small PR
 beats a padded one. If nothing needs changing, say so and move on. Then verify, once:
 
-## Verify before pushing (all three MUST pass)
+## Verify before pushing (all commands MUST pass)
 ```
+set -e
 lake exe cache get
-lake build
+lake build --iofail
 lake exe axioms
+lake exe module-system
+bash scripts/lint-env.sh
+bash scripts/lint-style.sh
 ```
 If `lake build` is red, FIX IT or retreat (below). Never push red.
 
 
-**Do this synchronously, in this one turn.** Run the three commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). If publication is blocked, preserve the local candidate and report the exact blocker.
+**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
 ## If the target won't close
 Never downgrade to a lookalike: a weakened statement, a degenerate special case, or scaffolding carrying the result's name. Retreat one rung at a time:
 1. Land the largest coherent sorry-free piece that still makes genuine progress towards a milestone, stating in the PR body exactly what remains.
 2. If no such piece exists, release your claim and stop without a PR. Do not substitute unrelated or peripheral work merely to produce an artifact.
 
+A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
+
 ## Submit
-If an operator configured a pre-push check, the safe wrapper runs it synchronously against the committed candidate. Wait for its terminal result; do not launch a duplicate validation or bypass a failed check. A failed check or push preserves local work. Diagnose the exact error: permission and transport failures do not establish a concurrent branch update.
+Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
 You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`): the branch is pushed there, and the PR is opened from your fork to `TauCetiProject/TauCeti:main`. You do not need write access to the canonical repo. (The wrappers are already configured to push to your fork — just run them.)
 - Create a branch `roadmap/<short-slug>-__WORKERID__` off `main` (the `-__WORKERID__` suffix keeps concurrent workers on one account from colliding). Commit with an informative conventional subject (`feat: <subject>`) and a substantive body explaining what changed, why, and the consumer/boundary. Do not add an AI co-author trailer or literal `\\n` escapes.
@@ -100,4 +106,4 @@ You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`)
   Do NOT run a raw `gh pr create`. The PR body opens with a paragraph beginning "This PR …" in imperative present, cites the exact roadmap target, includes a standalone `Roadmap: <target-roadmap>` line (using the canonical top-level directory, never `any`), and, after an upstream switch, a standalone `Consumer roadmap: <designated-roadmap>` line plus the explicit dependency edge. It **includes the `<!--tauceti-target:v1 …-->` marker from the claim step** (the wrapper rejects the PR without it), names any Mathlib infrastructure you vendored (with attribution), has no section headings, and ends with `🤖 Prepared with __AGENT__`. Title `feat: <subject>`.
 
 ## Report a submitted PR
-After opening a PR, end with a concise summary: the target and target roadmap you chose, the designated milestone it serves, why it was the most effective current step towards that milestone, the file(s) added and line count, the PR number/URL, the rubrics you read, and what your own review of the diff found and changed. You don't need to make claims about `lake build` or `lake exe axioms`; CI will handle that.
+After opening a PR, end with a concise summary: the target and target roadmap you chose, the designated milestone it serves, why it was the most effective current step towards that milestone, the file(s) added and line count, the PR number/URL, the rubrics you read, and what your own review of the diff found and changed. Include the terminal build, audit and lint results; never claim a check passed without its result.

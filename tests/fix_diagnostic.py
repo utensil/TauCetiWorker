@@ -15,7 +15,9 @@ Exit 0 = all cases agree; 1 = a mismatch.
 """
 
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -96,6 +98,35 @@ check(
     "actionable",
     "unlimited owned retries",
 )
+
+# Existing per-head counters survive a changed head; no additional persistent state.
+with tempfile.TemporaryDirectory() as td:
+    counters = tc.Counters(SimpleNamespace(state=Path(td)))
+    for key, count in (("fix-77-aaaaaaaaaaaa", 3), ("fix-77-bbbbbbbbbbbb", 2), ("fix-771-cccccccccccc", 90)):
+        counters.write(key, count)
+    total = counters.fix_pr_attempts(77)
+    assert total == 5
+    check(
+        "new head does not reset PR budget",
+        tc.fix_disposition(meta({"head_sha": HEAD}), HEAD, True, True, 0, per_pr=total),
+        "exhausted",
+        "5/5",
+    )
+    check(
+        "under PR budget stays eligible",
+        tc.fix_disposition(meta({"head_sha": HEAD}), HEAD, True, True, 0, per_pr=4),
+        "actionable",
+    )
+    check(
+        "pending contest still awaits adjudication",
+        tc.fix_disposition(meta({"head_sha": HEAD}), HEAD, True, True, 0, per_pr=total, pending_contest=True),
+        "waiting",
+    )
+    check(
+        "explicit owned recovery remains available",
+        tc.fix_disposition(meta({"head_sha": HEAD}), HEAD, True, True, 0, per_pr=total, retry_exhausted_fixes=True),
+        "actionable",
+    )
 
 # --- waiting: head matches but nothing blocks ----------------------------------------------------
 for states in ({"reuse": "error", "naming": "green"}, {"reuse": "absent"}):

@@ -28,7 +28,6 @@ REMOTE="${TAUCETI_PUSH_REMOTE:-origin}"
 CLAIM_KEY="${TAUCETI_CLAIM_KEY:-}"
 CLAIM_REPO_OVERRIDE="${TAUCETI_CLAIM_REPO:-}"
 CLAIM_SH="${TAUCETI_CLAIM_SH:-$(cd "$(dirname "$0")" && pwd)/claim.sh}"
-CHECK=""
 
 die() { echo "git-safe-push: $*" >&2; exit 1; }
 claim() {
@@ -38,60 +37,23 @@ claim() {
         "$CLAIM_SH" "$@"
     fi
 }
-check_claim() {
-    if [[ -n "$CLAIM_KEY" ]]; then
-        [[ -x "$CLAIM_SH" ]] || die "claim ownership could not be verified: helper unavailable; refusing to push"
-        claim holds "$CLAIM_KEY" >/dev/null 2>&1; holds_rc=$?
-        if [[ "$holds_rc" -ne 0 ]]; then
-            claim renew "$CLAIM_KEY" >/dev/null 2>&1; renew_rc=$?
-            [[ "$renew_rc" -eq 0 ]] || die \
-                "claim ownership could not be verified (holds rc=$holds_rc, renew rc=$renew_rc) — refusing to push"
-        fi
-    fi
-}
-# Do not spend a validation run after losing ownership.
-check_claim
-# Host rounds bind these values before launching the agent. A login shell or an
-# agent's mistaken `TAUCETI_PUSH_REMOTE=origin` must not redirect a fork repair.
-# Unbound callers (including Bubble) retain the existing environment contract.
-POLICY="$(git rev-parse --git-path tauceti-publication)" || die "publication policy location unreadable"
-if [[ -e "$POLICY" ]]; then
-    REMOTE="$(git config --file "$POLICY" --get publication.remote)" || die "bound remote unreadable"
-    bound_ref="$(git config --file "$POLICY" --get publication.ref)" || die "bound ref unreadable"
-    EXPECT="$(git config --file "$POLICY" --get publication.expect)" || die "bound expected head unreadable"
-    CHECK="$(git config --file "$POLICY" --get publication.check)" || die "bound check unreadable"
-    [[ -z "$bound_ref" || -z "$REF" || "$REF" == "$bound_ref" ]] || die "destination differs from the admitted PR branch"
-    REF="${bound_ref:-$REF}"
-fi
-[[ -n "$REMOTE" ]] || die "no destination remote"
 [[ -n "$REF" ]] || die "no destination branch (set TAUCETI_PUSH_REF or pass it as an argument)"
 
-# The checker runs synchronously against the commit that will actually be pushed.
-# It owns project-specific build/lint/audit commands and their terminal evidence.
-# Check again after it returns: a green result for a different HEAD is not valid.
-CANDIDATE="$(git rev-parse --verify HEAD)" || die "candidate HEAD unreadable"
-if [[ -n "$CHECK" ]]; then
-    [[ "$CHECK" = /* && -x "$CHECK" ]] || die "configured pre-push check is unavailable"
-    dirty="$(git status --porcelain)" || die "candidate status unreadable"
-    [[ -z "$dirty" ]] || die "commit the candidate before running publication validation"
-    "$CHECK" || die "candidate validation failed; no push attempted"
-    [[ "$(git rev-parse --verify HEAD)" == "$CANDIDATE" ]] || die "candidate changed during validation; no push attempted"
-    dirty="$(git status --porcelain)" || die "candidate status unreadable after validation"
-    [[ -z "$dirty" ]] || die "candidate became dirty during validation; no push attempted"
+# 1) Lease check (fail closed if we no longer hold the claim someone may have taken over).
+if [[ -n "$CLAIM_KEY" ]]; then
+    [[ -x "$CLAIM_SH" ]] || die "claim ownership could not be verified: helper unavailable; refusing to push"; claim holds "$CLAIM_KEY" >/dev/null 2>&1; holds_rc=$?
+    if [[ "$holds_rc" -ne 0 ]]; then
+        claim renew "$CLAIM_KEY" >/dev/null 2>&1; renew_rc=$?
+        [[ "$renew_rc" -eq 0 ]] || die \
+            "claim ownership could not be verified (holds rc=$holds_rc, renew rc=$renew_rc) — refusing to push"
+    fi
 fi
-
-# Validation may take time; verify the lease again immediately before pushing.
-if [[ -n "$CHECK" ]]; then check_claim; fi
 
 # 2) Branch-level CAS push. expected="" ⇒ create-only; else must still equal the observed oid.
 echo "git-safe-push: $REMOTE HEAD:$REF (--force-with-lease=$REF:${EXPECT:-<create-only>})" >&2
-if git push --force-with-lease="$REF:$EXPECT" "$REMOTE" "$CANDIDATE:$REF"; then
-    if [[ -n "${TAUCETI_PUBLISHED_HEAD_FILE:-}" ]]; then
-        printf '%s\n' "$CANDIDATE" >>"$TAUCETI_PUBLISHED_HEAD_FILE" \
-            || die "push succeeded but its publication receipt could not be written"
-    fi
+if git push --force-with-lease="$REF:$EXPECT" "$REMOTE" "HEAD:$REF"; then
     exit 0
 fi
-die "push failed; inspect Git's diagnostic above. A permission/transport failure is not a branch race.
-Only a stale-info/rejected lease establishes a compare-and-swap refusal. Preserve the candidate,
-verify the destination and remote head, and do not retry a plain 'git push'."
+die "push failed; inspect Git's diagnostic above. Permission or transport failures do not establish
+a branch race. Preserve the candidate, verify the destination and remote head, and do not retry
+a plain 'git push'."
