@@ -5,6 +5,7 @@ You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an 
 - See which checks failed and read their logs:
   - `gh pr checks __PR__ --repo TauCetiProject/TauCeti`
   - `gh run view <run-id> --repo TauCetiProject/TauCeti --log-failed` (use the run id from the failing check)
+- Match the failed run to its commit and compare the prior repair commits/checks when the same failure recurs. State why the previous change failed and what will differ this time; do not repeat an ineffective patch or re-trigger a deterministic failure.
 - Reproduce locally — this is the source of truth, not the log alone. The single `build` check bundles
   the sandboxed build, the audits, and the lint, so run the WHOLE suite, not just `lake build`:
   ```
@@ -29,6 +30,7 @@ You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an 
 
 ## Fix it on its merits
 - Diagnose the real cause (a broken proof, a renamed/missing Mathlib lemma, a linter error, an axiom-audit failure, a flaky/transient infra error). Fix the underlying problem.
+- If a review-requested `@[simp]` attribute causes `simpNF`, test the theorem with all candidate simp rules active. Preserve the useful theorem and remove or change the offending attribute as justified by the linter. Read the relevant review thread and report the exact lint evidence and why the requested attribute cannot stand, so the next review can adjudicate the request instead of restoring the same failing attribute. Do not weaken the theorem or suppress the linter.
 - If the shim-expiry command fails, its annotations name exact Mathlib replacements and affected sources. Migrate only the superseded declarations/imports, preserve or re-home source-only API, and update `TauCeti/mathlib-shims.json` in the same source-only change. The checker derives each inherited source's declaration surface from the PR merge base and ratchets its probes until that surface is migrated, deleted, or re-homed under an entry preserving those probes, so never make the check green by merely deleting probes or changing an exact target to a speculative/landing sentinel.
 - If the failure is genuinely transient/infra (e.g. cache fetch timeout), the code and shim-expiry command are green locally, and the failed logs contain no actionable migration, do NOT hack the code — push an empty commit to re-trigger CI (`git commit --allow-empty -m "chore: re-trigger CI"`) and say so in your report.
 - Prefer the smallest correct fix. If a declaration is unsalvageable, it is better to remove it than to leave the PR red — but never gut the PR into vacuity; if almost nothing survives, stop and report that rather than pushing an empty shell.

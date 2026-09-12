@@ -453,7 +453,7 @@ def _progress_snapshot(w: Worker, c: Candidate) -> dict | None:
 def _progressed(w: Worker, c: Candidate, pre: dict | None, *, bubble: bool = False) -> bool:
     """Require a remote publication change; for host work, match the existing checkout HEAD.
 
-    Publication is not review acceptance and does not refund repair attempts.
+    Publication is not review acceptance.
     Comments and unavailable queries cannot establish progress.
     """
     if pre is None:

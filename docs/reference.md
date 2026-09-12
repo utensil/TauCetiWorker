@@ -11,7 +11,7 @@ list is in `tauceti work -h`. For persistent workers, see
 | `--loop` | Run the driver: keep doing rounds, pacing against quota between them, instead of one. |
 | `--only TASKS` | Restrict the round to a comma list of `rebase,bump,progress,fix-ci,fix,review,roadmap` (default: the whole cascade). |
 | `--tend-scope {author,owned}` | Maintenance PR scope. `author` is legacy author-wide behavior; `owned` tends only PRs recorded for this worker id (fail-closed when its local record is absent or invalid). |
-| `--retry-exhausted-fixes` | Remove the default three-per-head and five-per-PR attempt ceilings for blocking fixes; requires `--tend-scope owned` and is inherited by loop rounds. |
+| `--retry-exhausted-fixes` | Remove the per-head attempt ceiling for blocking `fix` candidates; requires `--tend-scope owned` and is inherited by loop rounds. |
 | `--skip TASKS` | Drop a comma list of tasks from the cascade. Combines with `--only` by subtraction. |
 | `--agent AGENT` | `auto` (default), `codex`, `claude`, `kiro`, `deepseek`, or `minimax`. Kiro and OpenRouter providers are explicit-only and unpaced. |
 | `--author-model MODEL` | Exact authoring model for an explicit provider (CLI > provider environment > committed default). |

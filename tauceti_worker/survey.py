@@ -24,7 +24,6 @@ from .constants import (
     MAX_CI_ATTEMPTS,
     MAX_CI_PR_ATTEMPTS,
     MAX_FIX_ATTEMPTS,
-    MAX_FIX_PR_ATTEMPTS,
     MAX_OPEN_PRS,
     MAX_PROGRESS_ERRORS,
     MAX_REBASE_ATTEMPTS,
@@ -69,15 +68,6 @@ class Counters:
         v = self.read(name) + 1
         self.write(name, v)
         return v
-
-    def fix_pr_attempts(self, pr: int) -> int:
-        """Sum existing per-head debits; upgrading does not grant fresh repair credits."""
-        prefix = f"fix-{pr}-"
-        return sum(
-            self.read(path.name)
-            for path in self.state.glob(f"{prefix}*")
-            if re.fullmatch(r"[0-9a-f]{12}", path.name[len(prefix) :])
-        )
 
 
 # ============================================================================
@@ -479,7 +469,6 @@ def fix_disposition(
     *,
     pending_contest: bool = False,
     retry_exhausted_fixes: bool = False,
-    per_pr: int = 0,
 ) -> tuple[str, str]:
     """Classify a tended PR for the `fix` stage from its scoreboard meta. Returns (disposition, reason):
 
@@ -522,11 +511,6 @@ def fix_disposition(
         # review adjudicates that reply, the durable scoreboard remains blocking at the same head;
         # scheduling another fixer would only burn the per-head budget on the identical finding.
         return ("waiting", "author contest awaiting re-review")
-    if per_pr >= MAX_FIX_PR_ATTEMPTS and not retry_exhausted_fixes:
-        return (
-            "exhausted",
-            f"review repair attempts across heads are spent ({per_pr}/{MAX_FIX_PR_ATTEMPTS}) — needs a human",
-        )
     if per_head >= MAX_FIX_ATTEMPTS and not retry_exhausted_fixes:
         return (
             "exhausted",
@@ -870,7 +854,6 @@ def survey(
                 per_head,
                 pending_contest=pending_contest,
                 retry_exhausted_fixes=retry_exhausted_fixes,
-                per_pr=counters.fix_pr_attempts(p.number),
             )
             if disp == "skip":
                 continue
