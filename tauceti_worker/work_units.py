@@ -871,9 +871,9 @@ def _resume_metadata(w: Worker, c: Candidate) -> dict | bool | None:
 
 
 def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
-    """Preserve a changed checkout after a provider outage so the next round can resume it.
+    """Preserve a changed checkout after a failed host round so the next round can resume it.
 
-    A provider-capacity failure is not a reason to throw away a validated local commit. The checkpoint
+    A failed round is not a reason to throw away a local candidate. The checkpoint
     is private, keyed by the exact public head, and only restored when that head is still current. A
     dirty tree is stashed (including untracked source files) behind a durable private ref; a committed
     candidate is retained by its exact commit ref. Failure to checkpoint never masks the original
@@ -937,7 +937,7 @@ def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
             encoding="utf-8",
         )
         os.replace(tmp, meta_path)
-        log(f"  {label} #{c.pr}: checkpointed local candidate @{head[:12]} for provider-capacity resume")
+        log(f"  {label} #{c.pr}: checkpointed local candidate @{head[:12]} for failed-round resume")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
         log(f"  {label} #{c.pr}: could not checkpoint local candidate ({exc})")
 
@@ -1156,6 +1156,10 @@ def _do_fixlike(
         w.rs.bust(pr)
     else:
         reason = take_last_agent_infra_failure()
+        # Preserve failed host work before another target can use this shared checkout. Lint and
+        # publication failures need recovery too; only provider failures qualify for a refund.
+        if not bubble:
+            _checkpoint_resume(w, c, label)
         _refund_infra_failure(w, c, label, charged, reason=reason)  # raises NoProgress when provider fault
     return rc
 
