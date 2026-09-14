@@ -30,7 +30,9 @@ empty shell, or invent replacement scope. A failing check alone is not a reason 
   lake build --iofail
   lake exe axioms
   lake exe module-system
-  if [ "$(uname -s)" = Darwin ]; then command -v brew >/dev/null 2>&1 || { echo "Homebrew is required on macOS for the host linters" >&2; exit 1; }; bash_prefix="$(brew --prefix bash)" || exit 1; sed_prefix="$(brew --prefix gnu-sed)" || exit 1; export PATH="$bash_prefix/bin:$sed_prefix/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh && bash scripts/lint-style.sh
+On macOS, install GNU sed once with `brew install gnu-sed`, then put it on PATH in this shell with `export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"`.
+  bash scripts/lint-env.sh
+bash scripts/lint-style.sh
   ```
   If `lint-env` flags a declaration that is NOT in your diff, your branch is likely behind main (CI
   overlays your `TauCeti/` onto current main): merge `main` into the branch and re-check.
@@ -63,7 +65,9 @@ rm -f "$base_shims"; rm -rf "$base_root"
 lake build --iofail
 lake exe axioms
 lake exe module-system
-if [ "$(uname -s)" = Darwin ]; then command -v brew >/dev/null 2>&1 || { echo "Homebrew is required on macOS for the host linters" >&2; exit 1; }; bash_prefix="$(brew --prefix bash)" || exit 1; sed_prefix="$(brew --prefix gnu-sed)" || exit 1; export PATH="$bash_prefix/bin:$sed_prefix/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh && bash scripts/lint-style.sh
+On macOS, install GNU sed once with `brew install gnu-sed`, then put it on PATH in this shell with `export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"`.
+bash scripts/lint-env.sh
+bash scripts/lint-style.sh
 ```
 Iterate until every one is green. A green `lake build` alone is NOT enough — the `build` check also
 fails on an axiom-audit, module-system, or lint-env violation (e.g. a missing docstring). Never push red.

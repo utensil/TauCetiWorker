@@ -58,7 +58,9 @@ lake exe cache get
 lake build --iofail
 lake exe axioms
 lake exe module-system
-if [ "$(uname -s)" = Darwin ]; then command -v brew >/dev/null 2>&1 || { echo "Homebrew is required on macOS for the host linters" >&2; exit 1; }; bash_prefix="$(brew --prefix bash)" || exit 1; sed_prefix="$(brew --prefix gnu-sed)" || exit 1; export PATH="$bash_prefix/bin:$sed_prefix/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh && bash scripts/lint-style.sh
+On macOS, install GNU sed once with `brew install gnu-sed`, then put it on PATH in this shell with `export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"`.
+bash scripts/lint-env.sh
+bash scripts/lint-style.sh
 ```
 Iterate until green. Never push red.
 
