@@ -87,7 +87,7 @@ lake exe cache get
 lake build --iofail
 lake exe axioms
 lake exe module-system
-if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh && bash scripts/lint-style.sh
+if [ "$(uname -s)" = Darwin ]; then command -v brew >/dev/null 2>&1 || { echo "Homebrew is required on macOS for the host linters" >&2; exit 1; }; bash_prefix="$(brew --prefix bash)" || exit 1; sed_prefix="$(brew --prefix gnu-sed)" || exit 1; export PATH="$bash_prefix/bin:$sed_prefix/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh && bash scripts/lint-style.sh
 ```
 If `lake build` is red, FIX IT or retreat (below). Never push red.
 
