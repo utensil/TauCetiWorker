@@ -850,11 +850,16 @@ def run_agent_proc(
         # A refund asserts that the agent never ran. Structured work events are stronger evidence
         # than transcript length, while a final structured provider diagnostic is stronger evidence
         # than Bubble prelude lines. A retry event alone is deliberately not terminal evidence.
-        if provider in {"codex", "claude"} and renderer.saw_work:
-            return None
         classification_text = "\n".join(tail)
         if renderer.terminal_failure_final and renderer.terminal_failure_text:
             classification_text = renderer.terminal_failure_text
+        # Codex may emit a short structured preamble before the plain terminal capacity diagnostic.
+        # That preamble sets saw_work, but capacity is still a machine-wide launch failure; preserve
+        # the diagnosis so the caller checkpoints edits and enters bounded capacity back-off.
+        if _MODEL_CAPACITY_RE.search(classification_text):
+            return "provider model capacity unavailable"
+        if provider in {"codex", "claude"} and renderer.saw_work:
+            return None
         return classify_agent_failure(classification_text)
 
     if os.environ.get("TAUCETI_STREAM"):
