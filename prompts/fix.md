@@ -58,7 +58,7 @@ lake exe cache get
 lake build --iofail
 lake exe axioms
 lake exe module-system
-On macOS, install GNU sed once with `brew install gnu-sed`, then put it on PATH in this shell with `export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"`.
+# On macOS, install GNU sed once if needed: `brew install gnu-sed`.
 bash scripts/lint-env.sh
 bash scripts/lint-style.sh
 ```
