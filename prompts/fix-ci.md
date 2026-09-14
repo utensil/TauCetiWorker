@@ -29,10 +29,10 @@ empty shell, or invent replacement scope. A failing check alone is not a reason 
   lake build --iofail
   lake exe axioms
   lake exe module-system
-# On macOS, install GNU sed once if needed: `brew install gnu-sed`.
-if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
+  # On macOS, install GNU sed once if needed: `brew install gnu-sed`.
+  if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
   bash scripts/lint-env.sh
-bash scripts/lint-style.sh
+  bash scripts/lint-style.sh
   ```
   If `lint-env` flags a declaration that is NOT in your diff, your branch is likely behind main (CI
   overlays your `TauCeti/` onto current main): merge `main` into the branch and re-check.
