@@ -277,6 +277,25 @@ try:
         tc.agents.subprocess.Popen = worked_then_provider_failure
         tc.run_agent_proc(["claude"], env={}, logdir=Path(td), label="agent-claude", provider="claude")
         check("structured work prevents a false attempt refund", tc.take_last_agent_infra_failure(), None)
+
+        def codex_preamble_then_capacity(*_args, **_kwargs):
+            events = [
+                {"type": "thread.started", "thread_id": "capacity"},
+                {"type": "item.started", "item": {"type": "reasoning"}},
+                "Selected model is at capacity. Please try a different model.",
+            ]
+            return FakeProc(
+                "\n".join(item if isinstance(item, str) else tc.json.dumps(item) for item in events) + "\n",
+                returncode=1,
+            )
+
+        tc.agents.subprocess.Popen = codex_preamble_then_capacity
+        tc.run_agent_proc(["codex"], env={}, logdir=Path(td), label="agent-codex", provider="codex")
+        check(
+            "capacity after a Codex preamble remains infrastructure",
+            tc.take_last_agent_infra_failure(),
+            "provider model capacity unavailable",
+        )
 finally:
     tc.agents.subprocess.Popen = saved_popen
     if saved_stream is None:
