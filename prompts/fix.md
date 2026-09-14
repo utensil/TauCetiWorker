@@ -58,8 +58,8 @@ lake exe cache get
 lake build --iofail
 lake exe axioms
 lake exe module-system
-bash scripts/lint-env.sh
-bash scripts/lint-style.sh
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-style.sh
 ```
 Iterate until green. Never push red.
 

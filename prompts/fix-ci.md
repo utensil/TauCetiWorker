@@ -30,8 +30,8 @@ empty shell, or invent replacement scope. A failing check alone is not a reason 
   lake build --iofail
   lake exe axioms
   lake exe module-system
-  bash scripts/lint-env.sh
-  bash scripts/lint-style.sh
+  if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh
+  if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-style.sh
   ```
   If `lint-env` flags a declaration that is NOT in your diff, your branch is likely behind main (CI
   overlays your `TauCeti/` onto current main): merge `main` into the branch and re-check.
@@ -64,8 +64,8 @@ rm -f "$base_shims"; rm -rf "$base_root"
 lake build --iofail
 lake exe axioms
 lake exe module-system
-bash scripts/lint-env.sh
-bash scripts/lint-style.sh
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-env.sh
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi; bash scripts/lint-style.sh
 ```
 Iterate until every one is green. A green `lake build` alone is NOT enough — the `build` check also
 fails on an axiom-audit, module-system, or lint-env violation (e.g. a missing docstring). Never push red.
