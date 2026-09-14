@@ -1,5 +1,13 @@
 You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an AIs-welcome Lean 4 library downstream of Mathlib. You are in a checkout of the repo, already on the PR's branch. The `build` check is red. Work autonomously to completion: make CI green without weakening the PR.
 
+## Check that a contribution remains
+Before running builds or repairing CI, refresh `origin/main` and read the complete
+PR diff (`git diff origin/main...HEAD -- TauCeti/`), not just the latest commit.
+If the diff is empty, whitespace-only, or no longer contains a coherent contribution
+to the PR's target after review-driven removal or upstream changes, stop and report
+that disposition for human attention. Do not create a CI-retrigger commit, push an
+empty shell, or invent replacement scope. A failing check alone is not a reason to continue.
+
 ## Find out what's actually failing
 - Quote every complete URL passed to `gh api` (for example `gh api 'repos/OWNER/REPO/git/trees/main?recursive=1'`); zsh expands an unquoted `?` before `gh` receives it.
 - See which checks failed and read their logs:
@@ -32,7 +40,7 @@ You are fixing FAILING CI on pull request #__PR__ of TauCetiProject/TauCeti, an 
 - Diagnose the real cause (a broken proof, a renamed/missing Mathlib lemma, a linter error, an axiom-audit failure, a flaky/transient infra error). Fix the underlying problem.
 - If a review-requested `@[simp]` attribute causes `simpNF`, test the theorem with all candidate simp rules active. Preserve the useful theorem and remove or change the offending attribute as justified by the linter. Read the relevant review thread and report the exact lint evidence and why the requested attribute cannot stand, so the next review can adjudicate the request instead of restoring the same failing attribute. Do not weaken the theorem or suppress the linter.
 - If the shim-expiry command fails, its annotations name exact Mathlib replacements and affected sources. Migrate only the superseded declarations/imports, preserve or re-home source-only API, and update `TauCeti/mathlib-shims.json` in the same source-only change. The checker derives each inherited source's declaration surface from the PR merge base and ratchets its probes until that surface is migrated, deleted, or re-homed under an entry preserving those probes, so never make the check green by merely deleting probes or changing an exact target to a speculative/landing sentinel.
-- If the failure is genuinely transient/infra (e.g. cache fetch timeout), the code and shim-expiry command are green locally, and the failed logs contain no actionable migration, do NOT hack the code — push an empty commit to re-trigger CI (`git commit --allow-empty -m "chore: re-trigger CI"`) and say so in your report.
+- Only if a coherent target contribution remains, the failure is genuinely transient/infra (e.g. cache fetch timeout), the code and shim-expiry command are green locally, and the failed logs contain no actionable migration, do NOT hack the code — push an empty commit to re-trigger CI (`git commit --allow-empty -m "chore: re-trigger CI"`) and say so in your report.
 - Prefer the smallest correct fix. If a declaration is unsalvageable, it is better to remove it than to leave the PR red — but never gut the PR into vacuity; if almost nothing survives, stop and report that rather than pushing an empty shell.
 
 ## Rules of the repo (hard constraints)
@@ -68,11 +76,15 @@ audit. If the session handle is lost, inspect the process and its result before 
 not restart the command until the prior process is known to have ended. Require a successful
 terminal result for every verification command before committing or pushing.
 
-**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed and pushed (below). If publication is blocked, preserve the local candidate and report the exact blocker.
+**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Unless a stop condition above applies, do not yield, stop, or end your turn until you have committed and pushed (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
 A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
 
 ## Submit
+Repeat the remaining-contribution check above with the proposed repair included
+(inspect staged, unstaged, and new files as well as the committed PR diff). If the
+repair removes the last coherent target contribution, stop without committing or pushing.
+
 Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
 - Commit the fix with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
