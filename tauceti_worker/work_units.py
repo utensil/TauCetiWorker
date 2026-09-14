@@ -1107,8 +1107,13 @@ def _do_fixlike(
     else:
         meta = _resume_metadata(w, c)
         saved = meta if isinstance(meta, dict) else {}
+        # With no checkpoint, take the fresh-checkout path. The fork head may not exist in the
+        # shared clone yet; `gh pr checkout` below is responsible for fetching it. Only validate
+        # ancestry when resume metadata claims a saved candidate.
         reuse = (
-            None
+            False
+            if meta is False
+            else None
             if meta is None
             else continuation_checkout(
                 w.cfg,
