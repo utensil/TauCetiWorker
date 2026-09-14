@@ -25,6 +25,18 @@ You are authoring a new pull request to TauCetiProject/TauCeti, an AIs-welcome L
   rubrics you read.
 __SOURCE_GUIDANCE__- Before writing any declaration, `grep` the pinned Mathlib source to confirm it doesn't already exist (the `reuse` rubric is strict, and a generic fact transferred to a subtype is often already in Mathlib under a non-obvious import). The pinned Mathlib source is vendored in this checkout at `.lake/packages/mathlib` once `lake exe cache get` (or dependency resolution) has run — `grep` there; don't try to clone it from the network.
 
+## Admit the target before writing Lean
+Record a short binding in your working notes: the exact README item, planned public
+declarations and files, and either the roadmap endpoint they deliver or the named
+current/planned in-repository declaration that immediately consumes them. For a
+prerequisite, explain how that consumer uses the proposed result and reaches the
+roadmap item; general usefulness or a hypothetical future consumer is insufficient.
+Search current `main` and pinned Mathlib by statement/type as well as name, and
+inspect the diffs of likely overlapping open PRs from the scan above. Record the
+existing APIs/PRs checked and the specific missing contribution. Reject duplicate
+work, a weaker lookalike, or standalone API without this roadmap binding. If no
+admissible target remains, stop without a PR.
+
 ## Claim your target (so two agents don't author the same thing)
 Once you have settled on a target, derive a short stable id for it and claim it BEFORE you start building. This lets other autonomous workers see the target is taken; it is cooperative, not a hard lock.
 - **Target id:** `<slug>` = the target's most identifying phrase (its declaration name if it has one, else the key noun phrase of its statement/docstring), lowercased with every run of non-alphanumeric characters replaced by a single `-`. Keep it short and deterministic — another agent picking the *same* target should produce the *same* slug. Example: "the Galois group of a multiquadratic field is (ℤ/2)ⁿ" → `galois-group-multiquadratic-z2n`.
@@ -81,16 +93,24 @@ bash scripts/lint-style.sh
 If `lake build` is red, FIX IT or retreat (below). Never push red.
 
 
-**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). If publication is blocked, preserve the local candidate and report the exact blocker.
+**Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Unless a stop or retreat condition applies, do not yield, stop, or end your turn until you have committed, pushed, and opened the PR (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
 ## If the target won't close
 Never downgrade to a lookalike: a weakened statement, a degenerate special case, or scaffolding carrying the result's name. Retreat one rung at a time:
-1. Land the largest coherent sorry-free piece that still makes genuine progress towards a milestone, stating in the PR body exactly what remains.
+1. Land the largest coherent sorry-free piece that still passes the target-admission check above, stating in the PR body exactly what remains.
 2. If no such piece exists, release your claim and stop without a PR. Do not substitute unrelated or peripheral work merely to produce an artifact.
 
 A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
 
 ## Submit
+Before publishing, refresh `main` and repeat the overlap check against open and
+recently merged PRs. Check the actual candidate against the admission binding,
+including any reduced scope. If upstream now supplies it or no coherent admitted
+contribution survives, release your claim, preserve local work, and stop without a
+PR. Otherwise carry the same exact target, delivered declarations, and endpoint or
+immediate consumer into the existing PR-body explanation; do not invent a new
+justification at submission time.
+
 Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
 You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`): the branch is pushed there, and the PR is opened from your fork to `TauCetiProject/TauCeti:main`. You do not need write access to the canonical repo. (The wrappers are already configured to push to your fork — just run them.)
