@@ -1021,7 +1021,11 @@ def _do_fixlike(
         _clear_resume(w, c)
     else:
         reason = take_last_agent_infra_failure()
-        if reason and ("capacity" in reason or "could not reach" in reason or "provider returned" in reason):
+        # Preserve any candidate the agent left behind before the next round resets the shared
+        # checkout.  Provider failures are the common case, but lint, validation, and publication
+        # failures can also leave useful edits; dropping those makes the next attempt fail closed on
+        # an ambiguous dirty tree and repeat forever.
+        if not bubble:
             _checkpoint_resume(w, c, label)
         _refund_infra_failure(w, c, label, charged, reason=reason)  # raises NoProgress when provider fault
     return rc
