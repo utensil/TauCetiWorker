@@ -53,12 +53,12 @@ Run this gate when publishing source changes. A discussion-only round follows th
 above and may finish without running this gate or the Submit section.
 ```
 set -e
-if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 lake exe cache get
 lake build --iofail
 lake exe axioms
 lake exe module-system
 # On macOS, install GNU sed once if needed: `brew install gnu-sed`.
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 bash scripts/lint-env.sh
 bash scripts/lint-style.sh
 ```

@@ -18,7 +18,6 @@ empty shell, or invent replacement scope. A failing check alone is not a reason 
   the sandboxed build, the audits, and the lint, so run the WHOLE suite, not just `lake build`:
   ```
   set -e
-  if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
   lake exe cache get
   git fetch -q origin main
   shim_args=(--fail-on-available); base_shims="$(mktemp)"; base_root="$(mktemp -d)"; have_base=0
@@ -31,6 +30,7 @@ empty shell, or invent replacement scope. A failing check alone is not a reason 
   lake exe axioms
   lake exe module-system
 # On macOS, install GNU sed once if needed: `brew install gnu-sed`.
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
   bash scripts/lint-env.sh
 bash scripts/lint-style.sh
   ```
@@ -53,7 +53,6 @@ bash scripts/lint-style.sh
 ## Verify before pushing (ALL of these MUST pass — they are exactly what the `build` check runs)
 ```
 set -e
-if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 lake exe cache get
 git fetch -q origin main
 shim_args=(--fail-on-available); base_shims="$(mktemp)"; base_root="$(mktemp -d)"; have_base=0
@@ -66,6 +65,7 @@ lake build --iofail
 lake exe axioms
 lake exe module-system
 # On macOS, install GNU sed once if needed: `brew install gnu-sed`.
+if [ "$(uname -s)" = Darwin ]; then export PATH="$(brew --prefix bash)/bin:$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"; fi
 bash scripts/lint-env.sh
 bash scripts/lint-style.sh
 ```
