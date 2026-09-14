@@ -133,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
             (checkout / "new.txt").write_bytes(b"untracked bytes\x00\n")
             (checkout / "build").mkdir()
             (checkout / "build" / "artifact.bin").write_bytes(b"built-once\x00")
-            return 1  # worked capacity remains charged; no checkpoint/stash is made here
+            return 1  # validation failure stays charged and must preserve the candidate
 
         check(
             "second attempt sees staged bytes",
@@ -164,34 +164,22 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
         check("first worked attempt fails", first, 1)
         check("worked attempt remains charged", counters.read(f"fix-77-{public[:12]}"), 1)
         check(
-            "first attempt leaves mixed index/worktree",
+            "first attempt saves mixed index/worktree and cleans checkout",
             git(checkout, "status", "--porcelain", capture=True).stdout.splitlines(),
-            ["MM tracked.txt", "?? new.txt"],
+            [],
         )
         check("ignored artifact remains", (checkout / "build" / "artifact.bin").read_bytes(), b"built-once\x00")
 
-        # Existing recovery metadata can coexist with already materialized contents without replay.
         meta_path, commit_ref, _ = wu._resume_paths(worker, candidate)
-        git(checkout, "update-ref", commit_ref, public)
-        meta_path.parent.mkdir(parents=True)
-        meta_path.write_text(
-            json.dumps(
-                {
-                    "pr": 77,
-                    "public_head": public,
-                    "candidate_head": public,
-                    "commit_ref": commit_ref,
-                    "stash_ref": None,
-                    "stage": "fix",
-                }
-            )
-        )
+        checkpoint = json.loads(meta_path.read_text())
+        check("failed dispatch creates exact-head recovery", checkpoint["public_head"], public)
+        check("failed dispatch saves dirty payload", bool(checkpoint["stash_ref"]), True)
 
         other = wu.Candidate(88, "b" * 40, "other")
         kinds = Kinds([other, candidate])
         kinds.open_prs = [pr]
         wu._prioritize_continuation(worker, kinds)
-        check("same target is selected before another PR", kinds.kind("fix").actionable[0].pr, 77)
+        check("parked candidate does not monopolize queue", kinds.kind("fix").actionable[0].pr, 88)
 
         second = wu.dispatch("fix", worker, survey, candidate, opts)
         check("second attempt publishes", second, 0)
