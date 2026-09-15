@@ -85,7 +85,9 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
     bindir = root / "bin"
     bindir.mkdir()
     gh = bindir / "gh"
-    gh.write_text("#!/bin/sh\nset -e\ngit fetch -q origin topic:refs/remotes/origin/topic\nexec git checkout -q -B topic origin/topic\n")
+    gh.write_text(
+        "#!/bin/sh\nset -e\ngit fetch -q origin topic:refs/remotes/origin/topic\nexec git checkout -q -B topic origin/topic\n"
+    )
     gh.chmod(0o755)
     old_path = os.environ.get("PATH", "")
     os.environ["PATH"] = f"{bindir}{os.pathsep}{old_path}"
