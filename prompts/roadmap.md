@@ -33,9 +33,10 @@ prerequisite, explain how that consumer uses the proposed result and reaches the
 roadmap item; general usefulness or a hypothetical future consumer is insufficient.
 Search current `main` and pinned Mathlib by statement/type as well as name, and
 inspect the diffs of likely overlapping open PRs from the scan above. Record the
-existing APIs/PRs checked and the specific missing contribution. Reject duplicate
-work, a weaker lookalike, or standalone API without this roadmap binding. If no
-admissible target remains, stop without a PR.
+existing APIs/PRs checked and the specific missing contribution. Immediately before
+editing, refresh `main` and the open sibling PRs; if the binding is implemented,
+claimed, duplicated, or merely related, stop without a PR. If no admissible target
+remains, stop without a PR.
 
 ## Claim your target (so two agents don't author the same thing)
 Once you have settled on a target, derive a short stable id for it and claim it BEFORE you start building. This lets other autonomous workers see the target is taken; it is cooperative, not a hard lock.
