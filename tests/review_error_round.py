@@ -79,7 +79,7 @@ def exercise(*, before=None, after=None, code=0, sync_code=0, bubble=False, cont
             patch.object(wu, "review_in_bubble", side_effect=run),
             patch.object(wu, "_sync_review_outbox", return_value=sync_code) as sync,
             patch.object(wu, "me", return_value="tester"),
-            patch.object(wu, "warn_red"),
+            patch.object(wu, "warn_red") as warned,
             patch.object(wu, "runtime_snapshot", return_value={}),
             patch.object(wu, "report_failure") as reported,
         ):
@@ -99,6 +99,7 @@ def exercise(*, before=None, after=None, code=0, sync_code=0, bubble=False, cont
                 "busted": busted,
                 "released": released,
                 "reported": reported.call_args,
+                "warnings": [call.args[0] for call in warned.call_args_list],
             }
 
 
@@ -129,7 +130,8 @@ assert observed["outcome"] and observed["errors"] == 2, observed
 observed = exercise(before=round_record(2), after=unchanged)
 assert observed["result"] == 0 and not observed["failure"], observed
 observed = exercise(after=round_record(), sync_code=1)
-assert "publish failed" in observed["outcome"] and observed["failure"], observed
+assert "incomplete rubric execution" in observed["outcome"] and observed["failure"], observed
+assert not any("counts for auto-merge" in msg for msg in observed["warnings"]), observed
 assert observed["errors"] == 2, observed
 observed = exercise(after=round_record(), code=1)
 assert observed["result"] == 1 and observed["errors"] == 3, observed

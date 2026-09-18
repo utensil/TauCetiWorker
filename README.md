@@ -95,7 +95,7 @@ A round does exactly one unit of work: the first of these that applies.
 
 | Step | What it does |
 |------|--------------|
-| **Rebase** | Resolve one of our conflicting PRs — a genuine content conflict under `TauCeti/` after a sibling merged first (the root `TauCeti.lean` is auto-synced on `main`, so it no longer collides). |
+| **Rebase** | Reconcile one of our conflicting PRs, or a fork update requested by the merge sweep for the current head. Both use the existing per-PR rebase-attempt cap; `keep` pauses recovery. |
 | **Bump** | Adapt a red `bump-mathlib/` PR (the review bot opens those to move the Mathlib dependency forward) so `TauCeti/` builds against the new Mathlib. The worker never opens a bump itself. |
 | **Progress** | When the global eight-hour cadence is due, update one roadmap's generated `STATUS.md` and `PROGRESS.md` through TauCetiProgress. |
 | **Fix CI** | Repair one of our PRs whose `build` check is red. It cannot be reviewed until it builds, so this comes before Fix. |
@@ -103,14 +103,26 @@ A round does exactly one unit of work: the first of these that applies.
 | **Review** | Review an open PR whose head is green but not yet reviewed, with the `tauceti-review` engine. Maintenance on our own PRs takes priority so author-action work (`ci-failed` or `awaiting-author`) cannot be starved by unrelated reviews. |
 | **Roadmap** | Otherwise, open a new PR advancing a [roadmap](https://github.com/TauCetiProject/TauCetiRoadmap) target. |
 
+Review selection is cooperative across community workers. The worker named by
+the latest scoreboard gets a 20-minute first-refusal window on that PR's next
+green head or contest reply. After that window, every worker may take it;
+eligible reviews are chosen by an age-weighted lottery, with waiting-time weight
+capped after 24 hours so older work is favored without imposing a rigid queue.
+
 Merging green PRs, closing stuck ones, and de-duplicating are the repo's CI, not
 the worker. A GitHub API failure aborts the round rather than reading as "nothing
 to do", so a transient outage never falls through to authoring.
 
+A review has two outputs with different roles. The head-pinned scoreboard posted
+on the PR is the live verdict that auto-merge reads. Detailed run records are also
+kept in a local outbox for the public TauCetiData analytics/provenance archive;
+failure or lack of permission to publish that archive does not stop the posted
+review from counting.
+
 ## Configure a round
 
-Three independent dials: which work, which agent, and where it runs. Combine
-them however you like.
+Four independent dials: which work, which pull requests, which agent, and where
+it runs. Combine them however you like.
 
 ### What work: `--only`
 
@@ -220,6 +232,48 @@ Roadmap workers also avoid finer-grained targets other contributors have claimed
 on the [intentions board](https://github.com/leanprover-community/intentions).
 Adjust with `--roadmap-extra-identities` (logins that count as your own side) or
 turn it off with `--ignore-claims`; see [the reference](docs/reference.md).
+Assigned intentions carrying the maintainer-applied `administrative-hold` label are binding for
+every worker, including the assignee's own workers, and cannot be disabled by those options.
+
+### Which PRs: `--pr`
+
+A round normally picks its own target off the queue. `--pr <n>[,<n>...]` (repeat
+the flag, or pass a comma list; a leading `#` is fine) points it at particular
+pull requests instead:
+
+```bash
+tauceti work --pr 412                  # whatever the cascade wants to do to #412
+tauceti work --pr 412,415 --only fix   # only those PRs, and only the fix unit
+tauceti work --pr 412 --dry-run        # what it would do to #412, doing nothing
+```
+
+`--pr` only ever *removes* work. It cannot make a PR actionable that the round
+had already passed over, so a spent attempt budget, a peer's in-progress review,
+the daily review cap and the branch claims all still hold: "work on these PRs"
+means "of the work you were already willing to do, only this". Progress and
+roadmap rounds name no existing PR, so a targeted round drops them rather than
+quietly authoring something unrelated when the named PRs turn out to have
+nothing to do, and it makes no GitHub writes at all about PRs you did not name —
+not even the tracking issue an untargeted round files for a PR whose review
+keeps erroring.
+
+An empty or unreadable value is an error, not "no targeting": `--pr ""` and
+`--pr 4 12` both stop the round rather than quietly turning it back into a
+free-running worker.
+
+That case — nothing to do — is the one worth knowing about, so the round says
+why, one line per PR you named, before it exits without progress:
+
+```
+--pr: this round considers only #412, #415
+  --pr #412: fix: reviews at head are all green
+  --pr #415: review: daily cap 3/3 reached
+```
+
+`$TAUCETI_PR` is the environment equivalent, which is how a
+[managed worker](docs/workers.md) gets one through its `env` table. Under
+`--loop` the targeting is re-applied every round, so a targeted loop backs off
+rather than wandering onto other work.
 
 ### Which agent: `--agent`
 

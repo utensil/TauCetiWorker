@@ -168,6 +168,13 @@ class Config:
         # owner per claim.sh invocation, so in host mode a worker can't renew or recognise its own
         # branch/<pr> lease and git-safe-push fails closed with "lease lost (another agent took over)".
         os.environ["TAUCETI_WORKER_ID"] = wid
+        # Lake may otherwise leave a cache hit only in its local store, where TauCeti's later
+        # `lake exe axioms` and `lake exe module-system` audits cannot resolve it. Enable the store
+        # and restore its artifacts into the build directory as one default policy. A manager's
+        # per-worker `env` table is already present by this point, so setdefault preserves explicit
+        # experiments and opt-outs.
+        os.environ.setdefault("LAKE_ARTIFACT_CACHE", "1")
+        os.environ.setdefault("LAKE_RESTORE_ARTIFACTS", "1")
         h = home or Path(os.environ.get("HOME", os.path.expanduser("~")))
         # Two different homes, and conflating them is what made the macOS isolation change risky.
         # `home` answers "whose credentials?" and must follow the login user, because the macOS
@@ -222,6 +229,14 @@ def set_log_file(logdir: Path) -> None:
         _LOG_FH = open(path, "a", buffering=1)  # line-buffered: each log line flushes on its newline
     except OSError:
         _LOG_FH = None
+
+
+def one_line(text: str, limit: int = 200) -> str:
+    """`text` collapsed to a single trimmed line, capped at `limit`. A subprocess's stderr is the
+    reason an operator needs, but a status field and a log line are one line each, and a raw multi-line
+    tail turns either into a wall."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "\u2026"
 
 
 def log(msg: str) -> None:

@@ -46,6 +46,7 @@ from .quota import (
     codex_dir,
     mirror_creds,
 )
+from .review_diagnostics import failure_summary
 from .runtime_status import report_failure
 from .transcript import AgentTranscriptRenderer
 from .usage import UsageError, kiro_data_dir, kiro_process_env, snapshot_kiro_auth_db
@@ -521,6 +522,70 @@ def continuation_checkout(
         return None
 
 
+def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
+    """Drop this worker's owned Lake artifact store when canonical main changes toolchains.
+
+    The marker follows ``origin/main``, not the branch left by the previous round and not a PR the
+    worker is about to check out.  Otherwise alternating between an old-toolchain PR and current
+    main would erase the cache every round.  The first observation only seeds the marker, so enabling
+    this policy does not unexpectedly discard an established store.
+
+    Only the default per-worker path is ours to delete.  An explicit ``LAKE_CACHE_DIR`` can name an
+    operator-managed or shared store, and is therefore reported but left untouched.
+    """
+    import hashlib
+
+    toolchain_file = cfg.checkout / "lean-toolchain"
+    try:
+        contents = toolchain_file.read_bytes()
+    except OSError:
+        return
+    digest = hashlib.sha256(contents).hexdigest()
+    label = next((line.strip() for line in contents.decode(errors="replace").splitlines() if line.strip()), "empty")
+    label = label[:160]
+
+    marker = cfg.state / "cache" / "lake-cache-toolchain.json"
+    previous = _read_json_file(marker)
+    if not isinstance(previous, dict) or not isinstance(previous.get("sha256"), str):
+        # Missing is the expected migration path.  A corrupt marker is also treated conservatively:
+        # replace it, but do not turn unreadable bookkeeping into permission for a destructive clean.
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            _write_json_atomic(marker, {"sha256": digest, "toolchain": label})
+        except OSError as e:
+            log(f"Lake artifact cache: could not record toolchain marker ({e})")
+        return
+    if previous["sha256"] == digest:
+        return
+
+    old_label = str(previous.get("toolchain") or previous["sha256"][:12])
+    owned_cache = cfg.data_home / ".cache" / "lake"
+    configured_cache = Path(os.environ.get("LAKE_CACHE_DIR") or owned_cache)
+    same_path = os.path.abspath(configured_cache) == os.path.abspath(owned_cache)
+    if not same_path or configured_cache.is_symlink():
+        log(
+            f"Lake artifact cache: main toolchain changed ({old_label} → {label}); "
+            f"leaving operator-managed LAKE_CACHE_DIR untouched ({configured_cache})"
+        )
+    else:
+        try:
+            had_cache = configured_cache.exists()
+            if had_cache:
+                shutil.rmtree(configured_cache)
+        except OSError as e:
+            # Do not advance the marker: retry at the next quiescent checkout preparation.
+            log(f"Lake artifact cache: main toolchain changed ({old_label} → {label}), but cleanup failed ({e})")
+            return
+        result = f"cleared {configured_cache}" if had_cache else "cache already empty"
+        log(f"Lake artifact cache: main toolchain changed ({old_label} → {label}); {result}")
+
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(marker, {"sha256": digest, "toolchain": label})
+    except OSError as e:
+        log(f"Lake artifact cache: cleanup completed but could not update toolchain marker ({e})")
+
+
 def prepare_checkout(cfg: Config) -> bool:
     """Clean checkout of TauCeti main; retain ignored build artifacts for a later continuation."""
     sync_mathlib_pool(cfg)
@@ -554,7 +619,11 @@ def prepare_checkout(cfg: Config) -> bool:
                 continue
         log(f"checkout: git checkout failed ({detail})")
         return False
-    g("clean", "-fdq", "-e", ".lake")  # retain ignored build artifacts for exact-target continuation
+    # The checkout is quiescent here: the previous agent has exited and the next one has not started.
+    # Compare canonical main, rather than an arbitrary PR branch, and retire old-toolchain artifacts
+    # before anything can begin writing this worker's private Lake store again.
+    clean_lake_cache_after_toolchain_bump(cfg)
+    g("clean", "-fdq", "-e", ".lake")  # retain ignored exact-target build artifacts
     return True
 
 
@@ -907,7 +976,7 @@ def run_to_logfile(argv: list[str], logf: Path, label: str) -> int:
                 log("    " + line)
         except OSError:
             pass
-        summary = next((line.strip() for line in reversed(tail) if line.strip()), "")
+        summary = failure_summary(logf)
         reason = f"{label} exited with status {rc}"
         if summary:
             reason += f": {summary}"
@@ -933,7 +1002,13 @@ KIRO_BUBBLE_MIN_VERSION = "0.7.31"
 
 # TauCeti's public, anonymous Lake artifact cache. Mathlib's separate cache is fetched by
 # `lake exe cache get`; this one contains TauCeti's own main-built outputs.
-TAUCETI_CACHE_DOMAIN = "pub-1825e93d97ca45b2a98d9ad45a5972f8.r2.dev"
+#
+# The custom domain, NOT the bucket's `pub-<id>.r2.dev` development URL. That development URL is
+# disabled on this bucket and answers 401 for every path, root included, so every round's
+# `lake cache get` failed and fell through to a from-scratch `lake build` -- silently, because a
+# cache miss is non-fatal here. The custom domain is also what TauCeti's own CI publishes and reads
+# through (the LAKE_CACHE_*_PUBLIC repo variables). Keep the two in step.
+TAUCETI_CACHE_DOMAIN = "cache.taucetiproject.org"
 TAUCETI_CACHE_SERVICE = "tauceti-public"
 TAUCETI_CACHE_ARTIFACT_URL = f"https://{TAUCETI_CACHE_DOMAIN}/artifacts"
 TAUCETI_CACHE_REVISION_URL = f"https://{TAUCETI_CACHE_DOMAIN}/revisions"
@@ -972,6 +1047,39 @@ def bubble_supports_lake_cache_service() -> bool:
     import re
 
     return re.search(r"(?<![\w-])--lake-cache-service(?=[\s=,]|$)", _bubble_open_help()) is not None
+
+
+@functools.lru_cache(maxsize=1)
+def tauceti_cache_unreachable_reason() -> str | None:
+    """``None`` if TauCeti's public artifact cache serves anonymous reads, else why it does not.
+
+    Probes the revision endpoint rather than trusting the URL. A healthy bucket answers 404 for a
+    path that holds no object -- including its own root -- so ANY 404 here means the host is serving
+    us. What we are looking for is 401/403, which is what R2 returns for a bucket whose public access
+    is switched off: the host then rejects every path identically and no revision can ever be found.
+
+    That is not hypothetical. The worker pointed at the bucket's `pub-<id>.r2.dev` development URL
+    after it had been disabled, so `lake cache get` failed on every round and the non-fatal fallback
+    quietly rebuilt TauCeti from source each time. A dead endpoint must stop a round in preflight,
+    where it is one loud line, not 30 minutes into a build the cache existed to avoid.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"{TAUCETI_CACHE_REVISION_URL}/"
+    try:
+        with urllib.request.urlopen(url, timeout=30):
+            return None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"{url} answered {e.code} {e.reason}; the cache is not publicly readable"
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # Unreachable for a reason that is not an auth wall (DNS, TLS, offline). Do not block the
+        # round on it: the round's own `lake cache get` retries, and a transient network fault must
+        # not be indistinguishable from a misconfigured bucket.
+        log(f"could not probe TauCeti's artifact cache ({e}); continuing")
+        return None
 
 
 def _host_home() -> Path:
@@ -1315,13 +1423,36 @@ def bubble_work_cmd(inner: str) -> str:
     cache config for the host-global proxy. Keep a Lake-cache miss and the preliminary build non-fatal:
     fix/fix-ci/bump/rebase rounds often start from a red tree, and repairing it is the agent's job. A
     Mathlib-cache failure is fatal because compiling Mathlib would consume the round.
+
+    A Lake-cache miss stays non-fatal but no longer stays quiet, and the two reasons for one are now
+    told apart. "No outputs for this revision" is ordinary: it is every round on a commit main has not
+    built yet, and there is nothing to do but build them. Any OTHER failure means the cache did not
+    answer, which is infrastructure being broken rather than cold, and it used to look identical in the
+    log to the ordinary case. It printed one `warning: TauCeti Lake cache miss` line and rebuilt the
+    library from source, every round, for as long as the endpoint stayed down.
     """
+    fetch = f"lake cache get --service {TAUCETI_CACHE_SERVICE} --repo {TAUCETI}"
     return (
         "set -e; "
         "lake exe cache get || lake exe cache get; "
-        f"if ! lake cache get --service {TAUCETI_CACHE_SERVICE} --repo {TAUCETI}; then "
-        "echo 'warning: TauCeti Lake cache miss; building missing outputs' >&2; "
+        'tc_log="$(mktemp)"; tc_hit=0; tc_cold=0; '
+        # Two attempts, because a dropped connection is worth one retry, but stop immediately when
+        # Lake reports the revision simply is not cached: retrying cannot change that answer.
+        "for _ in 1 2; do "
+        f'if {fetch} >"$tc_log" 2>&1; then tc_hit=1; break; fi; '
+        "if grep -q 'no outputs found' \"$tc_log\"; then tc_cold=1; break; fi; "
+        "sleep 2; "
+        "done; "
+        'if [ "$tc_hit" != 1 ]; then '
+        'if [ "$tc_cold" = 1 ]; then '
+        "echo 'warning: TauCeti Lake cache holds no outputs for this revision; building them' >&2; "
+        "else "
+        "echo 'error: TauCeti Lake cache did not answer (not a missing revision); building TauCeti "
+        "from scratch. The cache endpoint is probably broken -- this should not happen.' >&2; "
+        "sed 's/^/  cache: /' \"$tc_log\" >&2; "
         "fi; "
+        "fi; "
+        'rm -f "$tc_log"; '
         "if ! timeout 1800 lake build; then "
         "echo 'warning: pre-agent lake build failed or timed out; the agent starts from a red tree' >&2; "
         "fi; "

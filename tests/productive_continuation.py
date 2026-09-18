@@ -40,6 +40,9 @@ class GitHub:
         self.remote = remote
         self.unknown = False
 
+    def pr_view(self, _pr, _fields):
+        return {"headRefOid": public, "state": "OPEN", "isDraft": False}
+
     def pr_progress_state(self, _pr):
         if self.unknown:
             return None
@@ -98,12 +101,19 @@ with tempfile.TemporaryDirectory(prefix="tauceti-continuation-") as td:
     worker = SimpleNamespace(
         cfg=cfg,
         gh=github,
-        rs=SimpleNamespace(bust=lambda _pr: None),
+        rs=SimpleNamespace(
+            bust=lambda _pr: None,
+            gh_meta=lambda _pr, **_kw: tc.Meta({"head_sha": public}, "fresh"),
+            ledger_blocking=lambda *_args: True,
+            newest_contest_reply=lambda _pr, **_kw: None,
+        ),
         counters=counters,
         rc=SimpleNamespace(change_base_head=None),
         claims=SimpleNamespace(begin_branch_work=lambda *_args: True),
     )
-    pr = SimpleNamespace(number=77, head_oid=public, head_ref="topic", head_owner="test", head_repo="repo")
+    pr = SimpleNamespace(
+        build_success=True, number=77, head_oid=public, head_ref="topic", head_owner="test", head_repo="repo"
+    )
     candidate = wu.Candidate(77, public, "blocking review")
     survey = SimpleNamespace(open_prs=[pr])
     opts = wu.RoundOpts(

@@ -262,6 +262,10 @@ class FakeGH:
         self.list_calls = []
         self.view_calls = []
 
+    def open_prs(self):
+        self.list_calls.append("paged-open-prs")
+        return self.full
+
     def pr_list(self, fields):
         self.list_calls.append(tuple(fields))
         if tuple(fields) in (
@@ -411,8 +415,13 @@ try:
         review_scope_prs=[2],
         scoped_review_only=False,
     )
-    check("non-review-only scope preserves full upstream query", gh.list_calls, [tc.PR_QUERY_FIELDS])
+    check("non-review-only scope preserves full upstream query", gh.list_calls, ["paged-open-prs"])
     check("non-review-only scope still filters review selection", [c.pr for c in sv.reviewable.actionable], [2])
+    tc.focus_prs(sv, SimpleNamespace(prs=(1,), only=["review"]))
+    check("general PR targeting cannot widen the review scope", sv.reviewable.actionable, [])
+    check(
+        "target exclusion names the review scope", "review scope" in tc.pr_focus_reason(sv, SimpleNamespace(), 1), True
+    )
 finally:
     survey_module.me = old_me
 

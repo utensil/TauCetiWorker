@@ -40,6 +40,7 @@ from .agents import (
     isolate_home,
     resolve_authoring_profile,
     run_in_bubble,
+    tauceti_cache_unreachable_reason,
 )
 from .config import (
     Config,
@@ -62,6 +63,7 @@ from .constants import (
     EX_NOPROGRESS,
     MAX_OPEN_PRS,
     OPENROUTER_MODELS,
+    PR_TASKS,
     TAUCETI,
     WORK_TASKS,
     validate_max_open_prs,
@@ -95,7 +97,9 @@ the cascade (priority order; a round does the first that applies):
   roadmap   open a new PR for a roadmap item
 
   With no --only a round walks the whole cascade; --only pins it to a subset,
-  --skip drops a subset (and the two combine by subtraction).
+  --skip drops a subset (and the two combine by subtraction). --pr narrows the
+  same round to named pull requests: it filters what the round would already
+  have done, so progress and roadmap (which name no existing PR) drop out.
 
 examples:
   tauceti work                          one round: auto agent, on the host
@@ -108,6 +112,8 @@ examples:
   tauceti work --loop --only review --review-author contributor-a,occasional-reviewer:0.3
                                         review actionable PRs from an allowed author
   tauceti work --loop --skip roadmap    the whole cascade except authoring new PRs
+  tauceti work --pr 412                 whatever the cascade wants to do to PR #412
+  tauceti work --pr 412,415 --only review,fix   only those two PRs, only those two units
   tauceti work --only roadmap --roadmap-only ReductiveGroups
   tauceti work --loop --roadmap-skip OneParameterSemigroups   leave that area to other workers
   tauceti work --only review --agent claude --bubble
@@ -126,6 +132,7 @@ environment (flags win; full reference linked below):
   TAUCETI_WORKER_ID      pins the worker id (else `work` auto-assigns worker1, worker2, ...)
   TAUCETI_ROADMAP_ONLY   single roadmap area (unset = a fresh random area each round; "" = all areas)
   TAUCETI_ROADMAP_SKIP   comma-separated roadmap areas to exclude from selection
+  TAUCETI_PR             comma-separated PR numbers; default for --pr
   TAUCETI_QUOTA_CMD      default for --quota-cmd
   TAUCETI_PACE           pacing curve "t:b,..." (default = 60:40); see --pace
   TAUCETI_AUTHORING_CODEX_MODEL / _EFFORT   exact Codex authoring profile
@@ -238,6 +245,20 @@ def add_work_flags(p: argparse.ArgumentParser, *, native_loop: bool = False) -> 
         help="drop these work units from the round (the inverse of --only); a comma list of "
         "the same names. Combines with --only by subtraction (--only review,fix --skip "
         "fix runs only review)",
+    )
+    p.add_argument(
+        "--pr",
+        action="append",
+        default=[],
+        metavar="N[,N...]",
+        help="work only on these pull requests: a comma list (or repeated flag) of PR numbers. "
+        "Filters what the round would already have done — it can never make a PR actionable that "
+        "the survey passed over, and never bypasses claims, attempt budgets, or the review caps. "
+        "Combines with --only by intersection; drops the two work units that name no existing PR "
+        "(progress, roadmap), so a targeted round never falls through to unrelated work — including "
+        "the tracking issues it would otherwise file for unrelated stuck PRs. When none of the named "
+        "PRs are actionable the round says why, per PR, and stops. An empty or unreadable value is "
+        "an error, never 'no targeting' (or $TAUCETI_PR)",
     )
     p.add_argument(
         "--agent",
@@ -452,6 +473,72 @@ def resolve_tasks(only_vals: list[str], skip_vals: list[str]) -> list[str]:
     return tasks
 
 
+# A `--pr` token: an optional `#` and then digits, nothing else. Deliberately strict — see
+# resolve_pr_targets on why a token it cannot read has to be an error rather than a skipped word.
+PR_TOKEN_RE = re.compile(r"#?[0-9]+")
+
+
+def resolve_pr_targets(values: list[str]) -> tuple[int, ...]:
+    """Flatten/validate --pr (comma lists or repeated flags), falling back to $TAUCETI_PR.
+
+    Three outcomes, and keeping them apart is the whole point:
+
+      - NOTHING SUPPLIED (no flag, and $TAUCETI_PR unset or blank) ⇒ (), the untargeted round every
+        ordinary invocation makes. A blank environment variable reads as unset here as it does
+        everywhere else in this CLI, because that is what an unfilled `.env` or `env` table entry is.
+      - SUPPLIED AND READABLE ⇒ the targets, de-duplicated in the order given. The round works down
+        its own cascade rather than this list, so the order steers nothing; keeping it stable only
+        makes the per-PR "why not" report read back the way it was typed.
+      - SUPPLIED AND EMPTY OR UNREADABLE ⇒ SystemExit. `--pr ""`, `--pr ",,"` and `TAUCETI_PR=",,"`
+        are the dangerous case: an operator who asked for targeting and got an unrestricted worker
+        instead is the one outcome this flag must never produce, and under `--loop` it would be an
+        unrestricted worker indefinitely. An explicit empty flag must not silently override a valid
+        $TAUCETI_PR either.
+
+    A token is `#?digits` and nothing else. A leading `#` is accepted because that is how a PR number
+    is written everywhere else — in the round's own log lines, on GitHub, and in the sentence the
+    operator just read — but internal whitespace is not: `--pr "4 12"` is a missing comma, and
+    reading it as #412 would send real work at a different PR that may well be actionable.
+    """
+    supplied = list(values)
+    where = "--pr"
+    if not supplied:
+        env = os.environ.get("TAUCETI_PR") or ""
+        if not env.strip():
+            return ()
+        supplied, where = [env], "$TAUCETI_PR"
+    out: list[int] = []
+    for value in supplied:
+        for raw in value.split(","):
+            tok = raw.strip()
+            if not tok:
+                continue
+            if not PR_TOKEN_RE.fullmatch(tok) or int(tok.lstrip("#")) <= 0:
+                raise SystemExit(f"{where} value {tok!r} is not a pull request number")
+            number = int(tok.lstrip("#"))
+            if number not in out:
+                out.append(number)
+    if not out:
+        raise SystemExit(
+            f"{where} was given but names no pull request. Omit it to let the round pick its own "
+            f"work; an empty target list must not quietly become an untargeted worker"
+        )
+    return tuple(out)
+
+
+def raise_on_untargetable_tasks(prs: tuple[int, ...], only: list[str]) -> None:
+    """Refuse `--pr` alongside a task selection that leaves no PR-bearing work unit enabled.
+
+    `--pr roadmap` cannot be honoured in any reading: the roadmap authors a PR that does not exist
+    yet, and a progress round writes a roadmap's generated reports. Silently doing nothing would be
+    the round's answer, one no-progress back-off at a time; saying so at the CLI costs one command."""
+    if prs and only and not any(t in PR_TASKS for t in only):
+        raise SystemExit(
+            f"--pr targets pull requests, but --only/--skip leave only {', '.join(only)} enabled and "
+            f"none of those act on an existing PR (PR work units: {', '.join(PR_TASKS)})"
+        )
+
+
 def resolve_review_throttle(cli_value: int | None, env: str, flag: str) -> int:
     """One of the undocumented review throttles, as an effective non-negative integer: the flag wins,
     else the environment variable, else 0 (off). A malformed value fails loudly rather than silently
@@ -657,6 +744,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_usage(args)
     if cmd in ("work", "_round"):
         only = resolve_tasks(getattr(args, "only", []), getattr(args, "skip", []))
+        prs = resolve_pr_targets(getattr(args, "pr", []))
+        raise_on_untargetable_tasks(prs, only)
         agent = resolve_agent(args)
         # --account names a CODEX account, so the round must be committed to Codex before it starts.
         # Under `auto` the pacer may legitimately land on Claude, and there is no honest answer then:
@@ -673,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                     "account identity in the credential this worker mirrors."
                 )
             )
-        return cmd_work(args, only=only, agent=agent, one_round=(cmd == "_round"))
+        return cmd_work(args, only=only, prs=prs, agent=agent, one_round=(cmd == "_round"))
     if cmd == "doctor":
         return cmd_doctor(args)
     if cmd == "workers":
@@ -819,7 +908,7 @@ def cmd_status(args) -> int:
     return 1 if sv.github_failed else 0
 
 
-def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
+def cmd_work(args, *, only: list[str], agent: str, one_round: bool, prs: tuple[int, ...] = ()) -> int:
     # --host used to opt OUT of the bubble sandbox; running on the host is now the default, so the flag
     # is a no-op we only warn about. --bubble is the way to opt back INTO the sandbox.
     if getattr(args, "host", False):
@@ -955,6 +1044,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             cfg,
             only=only,
             agent=agent,
+            prs=prs,
             review_scope_roadmaps=review_scope_roadmaps,
             review_scope_prs=review_scope_prs,
             review_scope_authors=review_scope_authors,
@@ -1027,6 +1117,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool) -> int:
             tend_scope=tend_scope,
             max_open_prs=max_open_prs,
             retry_exhausted_fixes=retry_exhausted_fixes,
+            prs=prs,
         )
         # Before preflight, and NOT gated on --dry-run: --dry-run is how an operator checks their setup,
         # so it is the one run that most needs to answer "am I on the right account?". The check is a
@@ -1202,6 +1293,18 @@ def preflight(cfg: Config, opts: RoundOpts) -> None:
             "`--lake-cache-service`. Install or update Bubble from kim-em/bubble, then re-run "
             "(override the executable with $TAUCETI_BUBBLE)."
         )
+    # Having the capability is not the same as the cache being readable through it. Check the endpoint
+    # itself, because the round's own fallback is to build TauCeti from source and carry on: a dead
+    # cache costs an hour per round and never fails anything, so nothing else would ever report it.
+    if uses_fork and not opts.dry_run:
+        unreachable = tauceti_cache_unreachable_reason()
+        if unreachable:
+            raise Die(
+                f"preflight: TauCeti's public Lake artifact cache is not readable: {unreachable}. "
+                "Every work round would rebuild the library from source instead. Check the bucket's "
+                "public access and that TAUCETI_CACHE_DOMAIN still matches the LAKE_CACHE_*_PUBLIC "
+                "repository variables on TauCetiProject/TauCeti, then re-run."
+            )
     # The CLI may advertise --allow-push while an older live daemon keeps rejecting fork pushes (403).
     # Require a reachable endpoint that advertises the capability, and refresh it safely when needed.
     # Fork-pushing rounds only (a stale daemon must not block review).

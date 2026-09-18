@@ -39,7 +39,18 @@ from .agents import (
     validate_kiro_model_access,
     wrapper_bin,
 )
-from .config import Config, Die, NoProgress, is_git_url, log, respect_claims, roadmap_areas, roadmap_skip, warn_red
+from .config import (
+    Config,
+    Die,
+    NoProgress,
+    is_git_url,
+    log,
+    one_line,
+    respect_claims,
+    roadmap_areas,
+    roadmap_skip,
+    warn_red,
+)
 from .constants import (
     AGENT_NAMES,
     AUTO_STAGES,
@@ -49,10 +60,12 @@ from .constants import (
     MAX_INFRA_REFUNDS,
     MAX_OPEN_PRS,
     OPENROUTER_MODELS,
+    PR_TASKS,
     PROGRESS_REF,
     PROGRESS_TOOL_LINE,
     PROGRESS_TOOL_TAIL,
     REVIEW,
+    REVIEW_AFFINITY_GRACE_S,
     REVIEW_DAILY_CAP,
     REVIEW_PROVIDER_DOWN_EXIT,
     ROADMAP,
@@ -60,7 +73,7 @@ from .constants import (
     TAUCETI,
 )
 from .github import GitHub, GitHubError, claims_repo, ensure_fork, gh_run, me
-from .intentions import claimed_avoid_list
+from .intentions import administrative_hold_avoid_list, claimed_avoid_list
 from .owned_prs import OwnedPRs, OwnedPRStateError
 from .paths import CLAIM_SH, HERE
 from .quota import Quota, _unavail_reason, mirror_creds
@@ -82,6 +95,8 @@ from .survey import (
     Counters,
     Survey,
     bust_progress_cache,
+    fix_disposition,
+    prioritize_review_candidates,
     progress_argv,
     spread_candidates,
     survey,
@@ -123,6 +138,8 @@ class RoundOpts:
     tend_scope: str = "author"
     max_open_prs: int = MAX_OPEN_PRS
     retry_exhausted_fixes: bool = False
+    # --pr: the pull requests this round is restricted to. Empty (the normal case) = no targeting.
+    prs: tuple[int, ...] = ()
 
     @property
     def agent_name(self) -> str:
@@ -182,11 +199,19 @@ def throttle_review(sv: Survey, opts, *, now: float | None = None) -> None:
     if not (min_queue or min_age):
         return
     queue = sv.reviewable.actionable
+    throttled = getattr(sv, "_review_throttled", None)
+    if throttled is None:
+        throttled = sv._review_throttled = {}
     if min_queue and len(queue) < min_queue:
         log(
             f"  review: {len(queue)} PR(s) awaiting review, below the requested minimum of "
             f"{min_queue} — not reviewing this round (--review-min-queue)"
         )
+        for c in queue:
+            throttled[c.pr] = (
+                f"review: only {len(queue)} PR(s) awaiting review, below the requested "
+                f"minimum of {min_queue} (--review-min-queue)"
+            )
         sv.reviewable.actionable = []
         return
     if not min_age:
@@ -202,6 +227,9 @@ def throttle_review(sv: Survey, opts, *, now: float | None = None) -> None:
             log(
                 f"  review #{c.pr}: awaiting review {waited}m, below the requested minimum of "
                 f"{min_age}m — skipping (--review-min-age)"
+            )
+            throttled[c.pr] = (
+                f"review: awaiting review {waited}m, below the requested minimum of {min_age}m (--review-min-age)"
             )
             continue
         kept.append(c)
@@ -232,6 +260,89 @@ def _prioritize_continuation(w: Worker, sv: Survey) -> None:
                 return
 
 
+def pr_focus_reason(sv: Survey, opts, pr: int) -> str:
+    """Why a `--pr` target is not being worked this round, in one line.
+
+    An operator who names a PR is owed an answer about THAT PR, so this reads the survey back for
+    everything it knows about it rather than reporting a bare "nothing to do". Several notes can be
+    true at once (a PR whose review is capped today may also have its fix budget spent), so they are
+    joined rather than raced: the first one printed is not necessarily the only reason, and hiding
+    the rest would send the operator to fix the wrong thing.
+
+    A stage's `suppressed` list, `review_inflight` / `review_capped` / `review_stuck` and
+    `fix_waiting` are the survey's own vocabulary for "considered and passed over"; anything left
+    over is either not an open PR at all, a draft, or open with genuinely nothing to do.
+    """
+    notes: list[str] = []
+    for stage in AUTO_STAGES:
+        if any(c.pr == pr for c in sv.kind(stage).actionable):
+            # Still in an actionable list after focus_prs filtered ⇒ only the task selection excludes it.
+            notes.append(f"actionable for {stage}, which this round's --only/--skip excludes")
+        for c in sv.kind(stage).suppressed:
+            if c.pr == pr:
+                spent = f" ({c.attempts}/{c.budget} attempts spent)" if c.budget else ""
+                notes.append(f"{stage} suppressed: {c.reason}{spent}")
+    notes += [f"review: a peer reviewer ({who}) holds this head" for n, who in sv.review_inflight if n == pr]
+    notes += [f"review: daily cap {count} reached" for n, count in sv.review_capped if n == pr]
+    if pr in sv.review_stuck:
+        notes.append("review keeps erroring without posting a verdict — needs infrastructure repair")
+    notes += [f"fix: {why}" for n, why in sv.fix_waiting if n == pr]
+    # A throttle removes a candidate silently, so without this a PR the operator named would be
+    # reported as having no work at all when in fact this worker was told to hold off on it.
+    throttled = getattr(sv, "_review_throttled", None) or {}
+    if pr in throttled:
+        notes.append(throttled[pr])
+    if notes:
+        return "; ".join(notes)
+    info = next((p for p in sv.open_prs if p.number == pr), None)
+    if info is None and getattr(sv, "review_query_scoped", False):
+        return "outside the review scope or absent from its open-PR query"
+    if any(c.pr == pr for c in getattr(sv, "review_scope_excluded", ())):
+        return "excluded by the configured review scope"
+    if info is None:
+        return f"not an open PR in {TAUCETI} (merged, closed, or never opened)"
+    if info.is_draft:
+        return "a draft — the worker acts only on ready-for-review PRs"
+    return "open, but the survey found no work unit actionable for it this round"
+
+
+def focus_prs(sv: Survey, opts) -> None:
+    """Restrict this round's candidates to the pull requests `--pr` named, in place.
+
+    This is a FILTER over what the survey already found actionable, never an override. Naming a PR
+    cannot make it actionable: if the survey put it in a `suppressed` list, behind the daily review
+    cap, or behind a peer's in-progress marker, it stays there, and the branch claim, attempt budgets
+    and review throttles downstream are untouched. "Work on these PRs" therefore means "of the work
+    you were already willing to do, only this" — which is the only reading under which an operator
+    steering a round cannot also spend past a limit the fleet relies on.
+
+    Applied AFTER throttle_review for the same reason: the throttles must see the review queue as it
+    really is, so `--review-min-queue 3` still means "three PRs are awaiting review" rather than
+    "three of the ones you named are".
+
+    Only the stages that act on an existing PR survive (PR_TASKS). `progress` and `roadmap` are not
+    about a PR of ours at all — they carry a pr=0 candidate, which no `--pr` value may be — so a
+    targeted round does not do them: the operator asked for these PRs, and quietly authoring an
+    unrelated roadmap PR instead would be the wrong answer to that request. (`roadmap` is dispatched
+    outside the candidate lists; run_round skips it.)
+
+    Whatever is left with nothing to do is explained PR by PR. The list is as long as the operator's
+    own, so this is bounded output, and it is the signal they actually asked for.
+    """
+    wanted = tuple(getattr(opts, "prs", ()) or ())
+    if not wanted:
+        return
+    keep = set(wanted)
+    for stage in AUTO_STAGES:
+        kind = sv.kind(stage)
+        kind.actionable = [c for c in kind.actionable if stage in PR_TASKS and c.pr in keep]
+    log(f"--pr: this round considers only {', '.join(f'#{n}' for n in wanted)}")
+    picked = {c.pr for stage in AUTO_STAGES if want(opts.only, stage) for c in sv.kind(stage).actionable}
+    for pr in wanted:
+        if pr not in picked:
+            log(f"  --pr #{pr}: {pr_focus_reason(sv, opts, pr)}")
+
+
 def run_round(w: Worker, opts: RoundOpts) -> int:
     # Re-mirror the operator's (externally-refreshed) credentials into this worker's isolated home
     # before any work runs. The quota pacer does this too, and every paced path now reaches it — but the
@@ -260,8 +371,11 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         review_enabled=want(opts.only, "review"),
     )
     if sv.github_failed:
-        detail = " ".join((sv.errors[0] if sv.errors else "GitHub survey failed").split())[:500]
-        raise NoProgress(f"{detail} — aborting round, not falling through to authoring")
+        # Name the failure gh reported. The survey already captured its stderr, and the generic line
+        # this used to raise ("gh pr list failed (GitHub API?)") sent an operator looking for a broken
+        # credential when the answer was an HTTP 504 from the GraphQL gateway, retried out of a round.
+        why = one_line("; ".join(sv.errors)) or "the open PR query failed (GitHub API?)"
+        raise NoProgress(f"{why} — aborting round, not falling through to authoring")
 
     label = "scoped open PRs" if sv.review_query_scoped else "open PRs"
     log(f"{label}: {sv.status_label_line()}")
@@ -286,9 +400,21 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         )
         if sv.review_query_scoped:
             log(f"review query: {sv.review_query_strategy} (hydrated {len(sv.open_prs)} open scoped PR(s))")
+    # `--pr` scopes what this round SAYS as well as what it does. Every note below is about one named
+    # PR, and pr_focus_reason repeats the ones that apply to a target anyway, so leaving them
+    # unfiltered would bury the operator's answer under a report about PRs they did not ask about.
+    targets = frozenset(getattr(opts, "prs", ()) or ())
+
+    def in_scope(pr: int) -> bool:
+        return not targets or pr in targets
+
     for pr, providers in sv.review_inflight:
+        if not in_scope(pr):
+            continue
         log(f"  review #{pr}: a peer reviewer ({providers}) holds this head — skipping (no duplicate spend)")
     for pr, count in sv.review_capped:
+        if not in_scope(pr):
+            continue
         if count.startswith("?"):
             log(f"  review #{pr}: local ledger unreadable — skipping review (fail-closed); fix the ledger")
         else:
@@ -302,32 +428,45 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
     # before the scoreboard landed printed a bare "no eligible work" with no hint the PR was just waiting.
     if "fix" in opts.only and not sv.needs_fix.actionable:
         for pr, why in sv.fix_waiting:
-            log(f"  fix #{pr}: {why}")
+            if in_scope(pr):
+                log(f"  fix #{pr}: {why}")
 
     # Escalate every PR the worker can't review (its review keeps erroring). This fires EVERY round
     # the condition holds — a bright-red warning so it can't be missed — and ensures one tracking issue
     # per PR for a permanent record. These PRs neither merge nor advance toward CI's round cap, so a
     # human must intervene; surfacing them loudly is the alternative to stranding them in silence.
+    #
+    # Two things it must not do. Under `--pr` it stays inside the target set: filing a tracking issue
+    # on GitHub for an unrelated PR is exactly the unrelated work a targeted round promises not to do,
+    # and it would repeat every round of a targeted loop. Under `--dry-run` it warns but writes
+    # nothing — neither the GitHub issue nor the local diagnostic backfill — because a dry run is how
+    # an operator inspects their setup and it is documented as acting on nothing.
     for pr in sv.review_stuck:
+        if not in_scope(pr):
+            continue
         n_err = w.counters.read(f"review-err-{pr}")
+        warn_red(
+            f"PR #{pr}: review has ERRORED {n_err}x without posting a verdict — the worker cannot "
+            f"review it. Needs infrastructure repair. https://github.com/{TAUCETI}/pull/{pr}"
+        )
+        if opts.dry_run:
+            log(f"[dry-run] would open/refresh the tracking issue for #{pr}")
+            continue
         head = next((item.head_oid for item in sv.open_prs if item.number == pr), "")
         retained = read_review_failure(w.cfg.state, pr)
         if not retained:
             retained = recover_review_failures(w.cfg.state, w.cfg.logdir, worker=w.cfg.wid, pr=pr, head=head)
         diagnostic = public_review_failure(retained)
-        warn_red(
-            f"PR #{pr}: review has ERRORED {n_err}x without posting a verdict — the worker cannot "
-            f"review it. Needs infrastructure repair. https://github.com/{TAUCETI}/pull/{pr}"
-        )
         reason = f"its review has errored {n_err} times without posting a verdict"
         w.gh.ensure_stuck_issue(pr, reason, diagnostic)
 
-    # Spread concurrent workers across different PRs: shuffle each CONTENDED stage's candidates so workers
-    # starting together don't all pick the lowest-numbered PR and probe the same target in lockstep
-    # (review collides on the in-progress marker; fix/fix-ci/rebase each cost a branch-claim round-trip to
-    # discover the clash). This only reorders WITHIN a stage — the cascade's stage priority below is
-    # unchanged — and the real de-contention (marker / branch claim) remains the authority and backstop.
+    # Spread concurrent workers across different branch-writing work: shuffle each non-review stage so
+    # workers starting together don't all pick the lowest-numbered PR and spend a branch-claim round-trip
+    # discovering the clash. Reviews get their affinity + age-weighted order below. This only reorders
+    # WITHIN a stage — the cascade's priority is unchanged — and the real claims remain the backstop.
     for stage in AUTO_STAGES:
+        if stage == "review":
+            continue
         sv.kind(stage).actionable = spread_candidates(sv.kind(stage).actionable)
     _prioritize_continuation(w, sv)
 
@@ -337,10 +476,37 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
     # worker isn't reviewing anyway, so a `--only fix` round never logs a review it was not going to do.
     if want(opts.only, "review"):
         throttle_review(sv, opts)
+        stamp = time.time()
+        affinity_present = any(
+            c.preferred_reviewer and c.ready_at is not None and max(0.0, stamp - c.ready_at) < REVIEW_AFFINITY_GRACE_S
+            for c in sv.reviewable.actionable
+        )
+        reviewer = ""
+        if affinity_present:
+            try:
+                reviewer = me()
+            except Die as exc:
+                log(f"  review: {exc}; reviewer affinity disabled for this round")
+        ordered, deferred = prioritize_review_candidates(sv.reviewable.actionable, reviewer, now=stamp)
+        sv.reviewable.actionable = ordered
+        if deferred:
+            waits = [REVIEW_AFFINITY_GRACE_S - max(0.0, stamp - c.ready_at) for c in deferred if c.ready_at is not None]
+            next_wait = max(0, int(min(waits))) if waits else REVIEW_AFFINITY_GRACE_S
+            log(
+                f"  review: deferring {len(deferred)} PR(s) for their previous reviewers; "
+                f"next first-refusal window expires in {next_wait // 60}m {next_wait % 60:02d}s"
+            )
+
+    # --pr: the operator named specific pull requests, so narrow every stage to those. Last of the
+    # three narrowings (task selection, throttles, targeting) because each earlier one answers a
+    # question about the queue as a whole, and answering it against an already-narrowed queue would
+    # change what it means.
+    focus_prs(sv, opts)
 
     # The cascade: first actionable stage wins, does ONE unit, returns its rc. A candidate that is
     # claimed elsewhere is skipped to the next one (COOP dedup); progress also returns None when its
     # fresh plan re-check finds the cached due verdict stale, so useful lower-priority work still runs.
+    declined: list[tuple[str, int]] = []
     for stage in AUTO_STAGES:
         if not want(opts.only, stage):
             continue
@@ -348,7 +514,11 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
             rc = dispatch(stage, w, sv, c, opts)
             if rc is not None:
                 return rc  # performed (or dry-run); else (None) claimed-elsewhere → try next candidate
-    if want(opts.only, "roadmap"):
+            declined.append((stage, c.pr))
+    # `roadmap` authors a PR that does not exist yet, so it can never be one of the PRs `--pr` named.
+    # A targeted round that finds nothing to do on its targets stops rather than falling through to
+    # authoring: the operator asked for those PRs, and unrelated work is not a substitute for them.
+    if want(opts.only, "roadmap") and not getattr(opts, "prs", ()):
         if sv.roadmap_backpressure:
             raise NoProgress(
                 f"roadmap: {sv.n_mine_open} open PRs in selected scope "
@@ -358,7 +528,19 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
         if rc is not None:
             return rc
 
-    raise NoProgress(f"no eligible work this round under --only={','.join(opts.only) or '(all)'}")
+    scope = f"--only={','.join(opts.only) or '(all)'}"
+    if targets:
+        # focus_prs explains every target it left with no candidate, but a target whose candidate was
+        # OFFERED to dispatch and turned down (a peer holds its claim, or progress's fresh re-check
+        # went stale) has had nothing said about it yet. Say it here rather than let the summary point
+        # at a reason that was never printed.
+        for stage, pr in declined:
+            log(f"  --pr #{pr}: {stage} candidate was offered but not taken (claimed by a peer, or re-checked stale)")
+        raise NoProgress(
+            f"nothing actionable on the requested PR(s) {', '.join(f'#{n}' for n in opts.prs)} this "
+            f"round ({scope}) — see the per-PR reasons above; no unrelated work was done"
+        )
+    raise NoProgress(f"no eligible work this round under {scope}")
 
 
 # Authoring/fixing stages whose success MUST leave a mark on GitHub (a push, a new PR, or — for a
@@ -510,6 +692,101 @@ def raise_on_account_mismatch(cfg: Config, account: str | None, work_model: str,
         raise Die(f"{where}: {problem}")
 
 
+def _still_actionable(stage: str, w: Worker, sv: Survey, c: Candidate) -> bool:
+    """Re-read THIS PR's review state live and confirm the candidate the survey chose still stands.
+
+    The survey triages on cached comment reads keyed to each PR's `updatedAt` (see
+    ReviewState.observe), which is what keeps a round's cost proportional to what CHANGED rather than
+    to how many PRs are open. That key is a strong signal but not a promise: a deleted scoreboard or a
+    deleted in-progress marker moves nothing, so a cached answer can be wrong in a way nothing
+    announces. A round spends on exactly ONE candidate, so this re-reads that one from GitHub, where
+    the cost is a couple of calls rather than one per open PR.
+
+    Declining returns None from dispatch, which is the cascade's existing "offered but not taken, try
+    the next candidate" path — the same one a peer's branch claim and progress's fresh re-check use.
+
+    Only the stages whose actionability comes from REVIEW state need this: rebase reads `mergeable`,
+    fix-ci and bump read the build, and roadmap/progress have no PR to re-read.
+
+    Every read here is FORCED past the cache rather than arranged by busting it first. Busting and then
+    reading normally looks equivalent and is not: the cache directory is shared with `status` and the
+    dashboard, either of which can republish an entitled record in the gap, and the read would come
+    back `assumed` from a fetch that happened before whatever prompted this re-check."""
+    if stage not in ("review", "fix"):
+        return True
+    # The head the survey saw. A contributor pushing since then makes every verdict below describe a
+    # commit that is no longer there, and _do_fixlike would check the NEW head out and work on it.
+    live = w.gh.pr_view(c.pr, ["headRefOid", "isDraft", "state"])
+    if live is None:
+        log(f"  {stage} #{c.pr}: could not re-read the PR before launching — leaving it for a later round")
+        return False
+    if live.get("state") != "OPEN" or live.get("isDraft") or live.get("headRefOid") != c.head:
+        log(f"  {stage} #{c.pr}: moved on since the survey (head, draft or closed) — skipping")
+        return False
+    meta = w.rs.gh_meta(c.pr, force=True)
+    if meta.provenance in ("stale", "fetch_failed"):
+        log(f"  {stage} #{c.pr}: could not re-read review state before launching — leaving it for a later round")
+        return False
+    if stage == "fix":
+        p = next((x for x in sv.open_prs if x.number == c.pr), None)
+        if p is None:
+            return False
+        blocking = w.rs.ledger_blocking(c.pr, c.head)  # reads the meta just forced above
+        # Mirror the survey's own pending-contest test (survey.py, the fix section): a contest reply
+        # that landed after the survey means the scoreboard is about to be re-adjudicated, and sending
+        # a fixer at the identical finding would just burn the per-head budget.
+        pending_contest = False
+        if blocking and str(meta.data.get("head_sha") or "") == c.head:
+            reply = w.rs.newest_contest_reply(c.pr, force=True)
+            through = meta.data.get("replies_through")
+            through = through if isinstance(through, int) else 0
+            pending_contest = bool(reply and reply["id"] > through)
+        disp, why = fix_disposition(
+            meta,
+            c.head,
+            p.build_success,
+            blocking,
+            w.counters.read(f"fix-{c.pr}-{c.head[:12]}"),
+            pending_contest=pending_contest,
+            retry_exhausted_fixes=(
+                getattr(sv, "retry_exhausted_fixes", False)
+                and getattr(sv, "tend_scope", "author") == "owned"
+                and c.pr in (getattr(sv, "owned_prs", None) or ())
+            ),
+        )
+        if disp != "actionable":
+            log(f"  fix #{c.pr}: not actionable on a fresh read ({why or disp}) — skipping")
+            return False
+        return True
+    held = w.rs.inflight_review(c.pr, c.head, force=True)
+    if held:
+        # Closer to launch than the survey's read was, so this de-contends BETTER than before: the
+        # window in which a peer can claim the head without us noticing is now the launch itself.
+        log(f"  review #{c.pr}: a peer reviewer ({','.join(sorted(held))}) holds this head — skipping")
+        return False
+    if c.contest:
+        reply = w.rs.newest_contest_reply(c.pr, force=True)
+        if not reply or reply.get("id") != c.contest_reply_id:
+            log(f"  review #{c.pr}: the contested reply is gone on a fresh read — skipping")
+            return False
+        # The same two tests the survey made, against state that has moved since it made them: a peer's
+        # review may have adjudicated this reply already (its watermark passes the reply id), and a
+        # peer's 👀 claim may have landed on it after the survey looked.
+        through = meta.data.get("replies_through")
+        if isinstance(through, int) and reply["id"] <= through:
+            log(f"  review #{c.pr}: this contest was adjudicated since the survey — skipping")
+            return False
+        age = w.gh.fresh_claim_age(c.contest_reply_id)
+        if age is not None and age < CONTEST_CLAIM_TTL:
+            log(f"  review #{c.pr}: a peer claimed this contest {age}s ago — skipping")
+            return False
+        return True
+    if w.rs.ledger_clean_head(c.pr) == c.head:
+        log(f"  review #{c.pr}: this head was reviewed since the survey read it — skipping")
+        return False
+    return True
+
+
 def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -> int | None:
     """Perform one stage. Returns its rc, or None if the candidate was claimed by another worker
     (caller tries the next candidate). Dry-run logs the intent and returns 0."""
@@ -556,6 +833,11 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
     # credentials at the top of every round, so a rotation since preflight is visible by now.
     if getattr(opts, "account", None):
         raise_on_account_mismatch(w.cfg, opts.account, opts.work_model, stage)
+    # Last free check before anything that spends — the entitlement probe and the Claude bootstrap
+    # below both cost a provider request. Everything above this line is local (a binary on PATH, the
+    # configured account), so it stays ahead of a network read that only matters if we get this far.
+    if not _still_actionable(stage, w, sv, c):
+        return None
     if needs_codex_probe:
         # Resolve Sol/Terra before the banner and before opening the authoring checkout. The probe is
         # checkout-independent and the selected profile is then consumed exactly once by either backend.
@@ -706,32 +988,26 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
                 w.counters.write(errkey, 0)
                 clear_review_failure(w.cfg.state, pr)
             # The engine archived this round's records to <store>/outbox but did NOT push (--no-sync).
-            # Publish them to TauCetiData with the host's creds. Loud on failure: records stuck in the
-            # outbox mean the merge gate can't see this round, so don't report the round as a success.
+            # Publish them to TauCetiData with the host's creds. The posted scoreboard is the live
+            # auto-merge verdict; TauCetiData is the analytics/provenance archive, so a sync failure is
+            # visible and non-lossy but must not turn a successfully posted review into failed work.
             srv = _sync_review_outbox(w, pr)
             if srv != 0:
-                # The sync failed: publishing this round's records to TauCetiData (a git push, after
-                # archive.sync's own retries) did not land — auth, network, or the remote being down.
-                # That is MACHINE-WIDE: every PR's publish would fail identically, so it must NOT be
-                # charged to this PR's review-error budget. Charging it did exactly the damage the
-                # host-binary preflight above guards against — a stale gh credential helper made every
-                # push fail, and green PRs marched one-by-one to the "needs a human" cap even though
-                # each review posted fine. Mirror that preflight: warn loudly and raise NoProgress
-                # (⇒ backoff, no counter bump). The review IS posted and its records are kept in the
-                # outbox; a later round re-drains them once the machine-wide cause clears.
+                # A push-capable host hit an archive outage (auth, network, remote, or local checkout).
+                # Keep the records for the next review's whole-outbox retry and warn, but continue the
+                # successful review path: the scoreboard already landed and can drive auto-merge.
+                outcome = "review incomplete" if incomplete else "review posted and counts for auto-merge"
                 warn_red(
-                    f"review #{pr}: the review posted, but publishing its records to TauCetiData "
-                    f"FAILED — records kept in {w.cfg.store_dir / 'outbox'}, so the merge gate can't "
-                    f"see this round until they land. This is machine-wide (every PR's publish would "
-                    f"fail the same way), so it is NOT charged to any PR's review-error budget. Check "
-                    f"the host's git/gh credentials; the loop re-drains on its own once it is fixed."
+                    f"review #{pr}: {outcome}, but publishing its "
+                    f"analytics/provenance records to TauCetiData FAILED — records kept in "
+                    f"{w.cfg.store_dir / 'outbox'}. This archive failure is NOT charged to the PR; "
+                    f"check the host's git/gh credentials. A later review retries the whole outbox."
                 )
-                raise NoProgress(f"review #{pr}: TauCetiData publish failed — machine-wide, not charged to the PR")
             if incomplete:
                 w.rs.bust(pr)
                 warn_red(
                     f"review #{pr}: the engine exited successfully but the recorded round is incomplete "
-                    f"({current_round.errors} rubric execution errors). Partial records were synced; "
+                    f"({current_round.errors} rubric execution errors). Partial records were retained; "
                     f"backing off without charging the PR's no-verdict error budget."
                 )
                 raise NoProgress(
@@ -747,7 +1023,7 @@ def do_review(w: Worker, sv: Survey, c: Candidate, opts: RoundOpts, bubble: bool
         elif rc == REVIEW_PROVIDER_DOWN_EXIT:
             # The engine stopped because the reviewer's provider is unusable — a revoked credential or
             # an exhausted subscription window — and it deliberately posted nothing (TauCetiReview#117).
-            # That is MACHINE-WIDE in exactly the sense the TauCetiData carve-out below means: the next
+            # That is MACHINE-WIDE in the same sense as an archive service outage: the next
             # PR the loop picks would abort identically, so charging it to whichever PR happened to be
             # this round's candidate is charging a PR for someone else's outage. Three of them strand
             # that PR at MAX_REVIEW_ERRORS: dropped from review candidacy and given a public "Review
@@ -794,16 +1070,16 @@ def _sync_review_outbox(w: Worker, pr: int) -> int:
     outbox = w.cfg.store_dir / "outbox"
     if not outbox.is_dir() or not any(p.is_file() for p in outbox.rglob("*")):
         return 0
-    # A contributor without write access to TauCetiData (anyone but the maintainer/worker identity)
-    # cannot push records there. Don't fail their round over it: the review IS posted and the records
-    # are kept in the local outbox — an external review will count once contributor-publishing lands.
+    # A contributor without write access to TauCetiData cannot push archive records there. The review
+    # itself already counts through its posted scoreboard; retain the records locally for a future
+    # contributor-publishing path without treating archival as operational review state.
     # The maintainer's identity returns push=true, so the sync below runs and a genuine outage still
     # surfaces loudly. A failed/ambiguous check falls through to the sync (preserving the loud-fail).
     perm = gh_run(["gh", "api", "repos/TauCetiProject/TauCetiData", "--jq", ".permissions.push"])
     if perm.returncode == 0 and perm.stdout.strip() == "false":
         log(
-            f"  review #{pr}: no write access to TauCetiData — review posted, records kept in "
-            f"{outbox} (they won't count for auto-merge until contributor-publishing lands)"
+            f"  review #{pr}: no write access to TauCetiData — review posted and counts for "
+            f"auto-merge; analytics/provenance records kept in {outbox}"
         )
         return 0
     eng = os.environ.get("TAUCETI_REVIEW_ENGINE_DIR")  # a local engine checkout, for pre-merge tests
@@ -1558,11 +1834,14 @@ def do_roadmap(w, sv, c, opts, bubble) -> int:
     # Never tell the agent to avoid the very area it's pinned to (a contradiction); the pinned area is
     # already excluded from the auto pick above, so this only matters for an explicit --roadmap-only.
     skip_str = ", ".join(a for a in skip if a != only) or "none"
-    # Cross-contributor claims: avoid targets others have claimed on the intentions board. Soft and
-    # fail-open; skipped for the "any" roam (no single area to scope the query to) and when opted out.
-    claimed_str = "none"
-    if respect_claims() and only not in ("any", ""):
-        claimed_str = claimed_avoid_list(w.gh, only)
+    # Administrative holds are binding, including for the holder's own workers, and fail closed.
+    # Ordinary cross-contributor claims remain cooperative, fail-open, and optional.
+    hold_area = None if only in ("any", "") else only
+    blocks = [administrative_hold_avoid_list(w.gh, hold_area)]
+    if only not in ("any", ""):
+        if respect_claims():
+            blocks.append(claimed_avoid_list(w.gh, only))
+    claimed_str = "\n".join(block for block in blocks if block != "none") or "none"
     refs = w.cfg.state / "refs"
     if not fetch_ref(ROADMAP, refs / "roadmap"):
         raise Die(f"fetch {ROADMAP} failed")

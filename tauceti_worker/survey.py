@@ -4,6 +4,7 @@ picker, `status`, and the TUI all consume."""
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
@@ -34,6 +35,9 @@ from .constants import (
     PROGRESS_ATTEMPT_GAP,
     PROGRESS_REF,
     PROGRESS_TTL,
+    REVIEW_AFFINITY_GRACE_S,
+    REVIEW_AGE_CAP_S,
+    REVIEW_AGE_SCALE_S,
     REVIEW_DAILY_CAP,
     STATUS_LABELS,
     TAUCETI,
@@ -135,6 +139,10 @@ class PRInfo:
     # with the head's new status. None when no `build` status carries a readable timestamp. Read off
     # the rollup we already fetch, so it costs no extra GitHub call.
     build_status_at: int | None = None
+    # GitHub's own clock on the PR, carried so ReviewState can tell whether anything about it has
+    # changed since it last read its comments (see ReviewState.observe). Free in the query we already
+    # make; "" when unknown, which reads as "cannot tell" and falls back to the plain TTL.
+    updated_at: str = ""
 
     @staticmethod
     def from_json(d: dict) -> PRInfo:
@@ -169,6 +177,7 @@ class PRInfo:
             build_failed=any(s in BUILD_FAIL for s in build_states),
             labels=tuple((lb.get("name") or "") for lb in (d.get("labels") or [])),
             build_status_at=max([t for t in posted if t is not None], default=None),
+            updated_at=str(d.get("updatedAt") or ""),
         )
 
 
@@ -181,6 +190,8 @@ class Candidate:
     budget: int = 0
     contest: str = ""  # set to the contested rubric when this is an author-contest re-review
     contest_reply_id: int = 0  # the review-comment id of the contesting reply (the 👀 claim anchor)
+    ready_at: int | None = None  # when this exact review unit became actionable
+    preferred_reviewer: str = ""  # latest scoreboard publisher; gets a short first refusal
 
 
 @dataclass
@@ -261,6 +272,12 @@ class Survey:
         # This is intentionally not a dataclass field: `status --json` uses asdict() and should not
         # duplicate the worker's PRs in its public payload.
         self._mine_open_prs: list[PRInfo] = []
+        # pr -> why the (undocumented) review throttles removed it from THIS round's queue. Also not a
+        # dataclass field, and for a second reason beyond the payload: it is a property of one round's
+        # options, not of the survey, so `status` and the dashboard must never report it. It exists so
+        # a `--pr` round can explain a target the throttles took, instead of reporting the survey found
+        # it no work.
+        self._review_throttled: dict[int, str] = {}
 
     def kind(self, name: str) -> WorkKind:
         return {
@@ -460,6 +477,55 @@ def spread_candidates(candidates: list, rng=random) -> list:
     return out
 
 
+def _review_age_weight(candidate: Candidate, now: float) -> float:
+    """Linear aging with a one-day cap; unknown/future timestamps stay at the base weight."""
+    waited = max(0.0, now - candidate.ready_at) if candidate.ready_at is not None else 0.0
+    return 1.0 + min(waited, REVIEW_AGE_CAP_S) / REVIEW_AGE_SCALE_S
+
+
+def _scoreboard_reviewer(meta: Meta) -> str:
+    value = meta.data.get("submitted_by")
+    return value if isinstance(value, str) else ""
+
+
+def prioritize_review_candidates(
+    candidates: list[Candidate], reviewer: str, *, now: float | None = None, rng=random
+) -> tuple[list[Candidate], list[Candidate]]:
+    """Apply soft reviewer affinity, then return an age-weighted random permutation.
+
+    During the grace period a prior publisher's units form that reviewer's first tier and are hidden
+    from peers. Expired or unowned units form the shared tier. Missing identity/timestamps fail open.
+    The second return value is the foreign-affinity set deferred for this worker.
+    """
+    stamp = time.time() if now is None else now
+    login = (reviewer or "").casefold()
+    owned: list[Candidate] = []
+    shared: list[Candidate] = []
+    deferred: list[Candidate] = []
+    for candidate in candidates:
+        owner = (candidate.preferred_reviewer or "").strip()
+        waited = max(0.0, stamp - candidate.ready_at) if candidate.ready_at is not None else None
+        in_grace = bool(owner and login and waited is not None and waited < REVIEW_AFFINITY_GRACE_S)
+        if not in_grace:
+            shared.append(candidate)
+        elif owner.casefold() == login:
+            owned.append(candidate)
+        else:
+            deferred.append(candidate)
+
+    def weighted(items: list[Candidate]) -> list[Candidate]:
+        # Exponential keys produce a weighted permutation without replacement. random() may legally
+        # return zero, so clamp it away from log(0) without changing any ordinary RNG result.
+        keyed = []
+        for candidate in items:
+            draw = max(float(rng.random()), 1e-300)
+            keyed.append((-math.log(draw) / _review_age_weight(candidate, stamp), candidate))
+        keyed.sort(key=lambda item: item[0])
+        return [candidate for _, candidate in keyed]
+
+    return weighted(owned) + weighted(shared), deferred
+
+
 def fix_disposition(
     meta: Meta,
     head: str,
@@ -485,14 +551,20 @@ def fix_disposition(
     fetches the meta + predicate, this decides the disposition and phrases the reason.
     """
     lh = str(meta.data.get("head_sha") or "")
+    if lh != head and not build_success:
+        return ("skip", "")  # red build: fix-ci/bump greens it before a review can land — not fix's
+    # A failed live fetch — whether or not a stale cache backs it — means we can't trust head_sha to
+    # tell "head moved" from "couldn't refresh", so don't assert either; say so and let a later round
+    # retry. This check used to sit inside the head-moved branch alone, which left the more dangerous
+    # case uncovered: a stale scoreboard whose head HAPPENS to match the current one sailed straight
+    # through to 'actionable' and scheduled a fixer off review state nobody had been able to confirm.
+    # `assumed` is deliberately not refused here. It is the normal state of a warm cache, and refusing
+    # it would park every fix candidate until the backstop expired; what protects the spend is that
+    # dispatch() re-reads this PR live before acting on it.
+    if meta.provenance in ("fetch_failed", "stale"):
+        return ("waiting", "could not read current review state (GitHub fetch failed) — will retry next round")
     if lh != head:
         # No (current) review verdict stands at the head.
-        if not build_success:
-            return ("skip", "")  # red build: fix-ci/bump greens it before a review can land — not fix's
-        # A failed live fetch — whether or not a stale cache backs it — means we can't trust head_sha to
-        # tell "head moved" from "couldn't refresh", so don't assert either; say so and let a later round retry.
-        if meta.provenance in ("fetch_failed", "stale"):
-            return ("waiting", "could not read current review state (GitHub fetch failed) — will retry next round")
         if lh:
             return ("waiting", f"reviewed at {lh[:12]}; head moved to {head[:12]} — awaiting re-review")
         return ("waiting", "build-green, awaiting first review (no scoreboard at this head yet)")
@@ -677,17 +749,18 @@ def survey(
         ),
     )
     try:
-        raw = (
-            scoped_review_pr_json(gh, scope_roadmaps, scope_prs, scope_authors)
-            if use_scoped_query
-            else gh.pr_list(list(PR_QUERY_FIELDS))
-        )
+        raw = scoped_review_pr_json(gh, scope_roadmaps, scope_prs, scope_authors) if use_scoped_query else gh.open_prs()
     except GitHubError as e:
         sv.github_failed = True
         sv.errors.append(str(e))
         return sv
     prs = [PRInfo.from_json(d) for d in raw]
     sv.open_prs = prs
+    # Hand ReviewState this pass's clocks BEFORE any per-PR read below: they are what let it skip the
+    # comment fetch for a PR that has not moved since the last round looked at it. A shallow survey
+    # reads no review state at all and its callers need not supply one.
+    if rs is not None:
+        rs.observe(prs)
     nondraft = [p for p in prs if not p.is_draft]
     me_login = me()
     owned: set[int] | None = None
@@ -716,14 +789,23 @@ def survey(
     # total with the subset this identity authored, for the per-round "open PRs" line.
     sv.status_labels, sv.n_status_unlabeled = bucket_status_labels(nondraft, me_login)
 
-    # 1) rebase: tended (ours or bot-authored), CONFLICTING, under the per-PR rebase-attempt budget.
+    # 1) rebase: tended (ours or bot-authored), conflicting or a sweep handoff for
+    #    this exact head, under the existing per-PR rebase-attempt budget.
     #    Covers a bot bump PR that main moved out from under — no bump-specific conflict resolver
     #    exists, so rebase owns the git conflict on those too. No review-round gate: a conflicting PR
     #    is rebased until it merges or CI retires it.
     for p in tended:
-        if p.mergeable != "CONFLICTING":
+        labels = {label.lower() for label in p.labels}
+        if labels & {"keep", "hold", "wip", "human", "do-not-close"}:
             continue
-        c = Candidate(p.number, p.head_oid, "conflicting")
+        reason = "conflicting"
+        if p.mergeable != "CONFLICTING":
+            if "needs-rebase" not in labels:
+                continue
+            if not gh.rebase_requested(p.number, p.head_oid):
+                continue
+            reason = "merge-sweep requested branch reconciliation"
+        c = Candidate(p.number, p.head_oid, reason)
         c.attempts = counters.read(f"rebase-pr-{p.number}")
         c.budget = MAX_REBASE_ATTEMPTS
         (sv.rebaseable.suppressed if c.attempts >= c.budget else sv.rebaseable.actionable).append(c)
@@ -742,7 +824,9 @@ def survey(
         if not p.build_success:
             continue
         if not deep:
-            sv.reviewable.actionable.append(Candidate(p.number, p.head_oid, "build-green, head not cleanly reviewed"))
+            sv.reviewable.actionable.append(
+                Candidate(p.number, p.head_oid, "build-green, head not cleanly reviewed", ready_at=p.build_status_at)
+            )
             continue
         m = rs.gh_meta(p.number)
         if rs.ledger_clean_head(p.number) != p.head_oid:
@@ -753,6 +837,8 @@ def survey(
                 "build-green, head not cleanly reviewed",
                 attempts=counters.read(f"review-err-{p.number}"),
                 budget=MAX_REVIEW_ERRORS,
+                ready_at=p.build_status_at,
+                preferred_reviewer=_scoreboard_reviewer(m),
             )
             if c.attempts >= c.budget:
                 sv.reviewable.suppressed.append(c)
@@ -805,6 +891,8 @@ def survey(
             contest_reply_id=reply["id"],
             attempts=counters.read(f"review-contest-{p.number}"),
             budget=MAX_REVIEW_CONTESTS,
+            ready_at=_parse_iso8601(reply.get("created_at")),
+            preferred_reviewer=_scoreboard_reviewer(m),
         )
         if (
             counters.read(f"review-contest-{p.number}") >= MAX_REVIEW_CONTESTS
