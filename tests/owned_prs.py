@@ -66,7 +66,7 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
 
     owned.path.write_text("3\n")
     survey_mod.me = lambda: "alice"
-    gh = SimpleNamespace(pr_list=lambda fields: [pr(3), pr(4)])
+    gh = SimpleNamespace(open_prs=lambda: [pr(3), pr(4)])
     counters = SimpleNamespace(read=lambda name: 0)
     sv = survey_mod.survey(cfg, gh, None, counters, deep=False, tend_scope="owned")
     check("owned survey tends only recorded PRs", [c.pr for c in sv.rebaseable.actionable] == [3])
@@ -83,10 +83,11 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
         }
     ]
     old_due = survey_mod.progress_due
-    old_pr_list = gh.pr_list
+    old_open_prs = gh.open_prs
     survey_mod.progress_due = lambda *_args, **_kwargs: (False, "")
-    gh.pr_list = lambda fields: pending_raw
+    gh.open_prs = lambda: pending_raw
     exploding_rs = SimpleNamespace(
+        observe=lambda _prs: None,
         gh_meta=lambda _pr: (_ for _ in ()).throw(AssertionError("stale review metadata was consulted")),
         ledger_blocking=lambda *_args: (_ for _ in ()).throw(AssertionError("stale blocking state was consulted")),
     )
@@ -99,15 +100,16 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
         )
     finally:
         survey_mod.progress_due = old_due
-        gh.pr_list = old_pr_list
+        gh.open_prs = old_open_prs
 
     # A maintenance-only survey must not fetch scoreboards for unrelated open PRs.  This is the
     # regression boundary for a hung paginated `gh api` call starving an owned PR.
     green_owned = {**pr(3), "statusCheckRollup": [{"context": "build", "state": "SUCCESS"}]}
     green_unrelated = {**pr(4), "statusCheckRollup": [{"context": "build", "state": "SUCCESS"}]}
-    gh.pr_list = lambda fields: [green_owned, green_unrelated]
+    gh.open_prs = lambda: [green_owned, green_unrelated]
     consulted = []
     maintenance_rs = SimpleNamespace(
+        observe=lambda _prs: None,
         gh_meta=lambda n: consulted.append(n) or SimpleNamespace(data={}, provenance="missing"),
         ledger_clean_head=lambda *_args: "",
         ledger_blocking=lambda *_args: False,
@@ -137,7 +139,7 @@ with TemporaryDirectory(prefix="owned-prs-") as raw:
 
     # The same owned-only override must reopen exhausted red-CI work, including the lifetime PR cap.
     red = {**pr(3), "statusCheckRollup": [{"context": "build", "state": "FAILURE"}]}
-    gh.pr_list = lambda fields: [red]
+    gh.open_prs = lambda: [red]
     exhausted = SimpleNamespace(
         read=lambda name: (
             survey_mod.MAX_CI_ATTEMPTS

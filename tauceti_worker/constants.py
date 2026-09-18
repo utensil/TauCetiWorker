@@ -47,7 +47,7 @@ REVIEW_PROVIDER_DOWN_EXIT = 3
 # not recognise and every report wedges. Bump this together with the two pins in
 # TauCetiRoadmap/.github/workflows/progress-*.yml.
 PROGRESS = os.environ.get("TAUCETI_PROGRESS_REPO", "TauCetiProject/TauCetiProgress")
-PROGRESS_REF = os.environ.get("TAUCETI_PROGRESS_REF", "880e8b9737973bfbd8f1f214f4ac2ded67f5b856")
+PROGRESS_REF = os.environ.get("TAUCETI_PROGRESS_REF", "dbb229dec0434fd7faaa18a79c776b18f18a8252")
 PROGRESS_TTL = int(os.environ.get("TAUCETI_PROGRESS_TTL", "600"))  # seconds a `due` verdict stays fresh
 MAX_PROGRESS_ERRORS = 3  # consecutive failed progress rounds before backing off
 PROGRESS_ATTEMPT_GAP = int(os.environ.get("TAUCETI_PROGRESS_GAP", "28800"))  # min seconds between attempts
@@ -73,6 +73,17 @@ MAX_REVIEW_CONTESTS_PER_RUBRIC = 3  # per-rubric cap so one noisy thread can't s
 # can SKIP a capped PR during the survey — before launching the engine (and its expensive clones) — instead
 # of re-selecting it every round and tight-looping. MUST stay in sync with the engine default (review.py).
 REVIEW_DAILY_CAP = int(os.environ.get("TAUCETI_REVIEW_DAILY_CAP", "12"))
+
+# Soft reviewer affinity: the publisher of the latest scoreboard gets first refusal on a new
+# reviewable head (or an author contest) for twenty minutes. After that the unit returns to the shared
+# fleet queue. Fixed fleet policy rather than an operator knob: reviewers must agree on the same grace.
+REVIEW_AFFINITY_GRACE_S = 20 * 60
+
+# Review candidates are drawn by an age-weighted lottery. One hour of waiting adds one unit of weight;
+# cap at one day so old work is strongly preferred without making every worker converge deterministically
+# on the single oldest PR.
+REVIEW_AGE_SCALE_S = 60 * 60
+REVIEW_AGE_CAP_S = 24 * 60 * 60
 
 CONTEST_CLAIM_TTL = 3600  # seconds a 👀 on the contested reply claims an in-flight contest re-review.
 
@@ -158,9 +169,39 @@ GH_COMMAND_TIMEOUT = int(os.environ.get("TAUCETI_GH_COMMAND_TIMEOUT", "120"))
 
 GH_SECONDARY_BASE = 60  # first secondary-limit sleep when no Retry-After is given (then exponential)
 
+# Transient GitHub failures: a 5xx from the API gateway, or a response that died mid-body. Distinct
+# from a rate limit — nothing is throttling us, the request simply did not survive. The survey's
+# opening `gh pr list` asks for statusCheckRollup over every open PR, which takes ~10s server-side and
+# is answered with an HTTP 504 often enough to abort whole rounds. A retry a few seconds later almost
+# always lands, so these get a short in-place retry (see gh_run) rather than costing a round.
+# The open-PR survey that opens every round. It used to be one `gh pr list --limit 200` carrying
+# statusCheckRollup, whose cost grew with the number of open PRs: at ~100 PRs it took ~10s server-side
+# against a GraphQL gateway that gives up around 11, and past 200 PRs it would have started silently
+# dropping the rest. The survey pages instead, so the cost of any ONE request is fixed by the page size
+# no matter how large the project grows, and no page is anywhere near the gateway's patience.
+OPEN_PR_PAGE = int(os.environ.get("TAUCETI_OPEN_PR_PAGE", "100"))  # PRs per request (GitHub's maximum)
+
+OPEN_PR_MAX_PAGES = int(os.environ.get("TAUCETI_OPEN_PR_MAX_PAGES", "100"))  # refuse to loop forever
+
+GH_TRANSIENT_TRIES = 3  # retries after a transient failure, then surface it
+
+GH_TRANSIENT_BASE = 5  # first transient-failure sleep, doubling per retry (5s, 10s, 20s)
+
 _GH_PRIMARY_RE = re.compile(r"(?:API )?rate limit exceeded|rate limit.*exceeded", re.I)
 
 _GH_SECONDARY_RE = re.compile(r"secondary rate limit|abuse detection", re.I)
+
+# Each of these is the transport or the server failing, never a verdict about our request: a 5xx, a
+# body that stopped arriving (gh reports the truncation as a JSON parse error), or a dropped
+# connection. Deliberately narrow — a 4xx is an answer, and retrying one just repeats it.
+# Conservatively refuse automatic retries for any document containing a mutation operation,
+# including a multi-operation document whose selected mutation is not first.
+_GQL_MUTATION_RE = re.compile(r"\bmutation\b")
+
+_GH_TRANSIENT_RE = re.compile(
+    r"HTTP 5\d\d|unexpected (?:EOF|end of JSON input)|stream error:|connection reset by peer|i/o timeout|TLS handshake timeout",
+    re.I,
+)
 
 
 # Claims / scoreboard cache.
@@ -169,6 +210,16 @@ CLAIM_TTL_S = int(os.environ.get("CLAIM_TTL", "1500"))  # 25 min lease; expires 
 CLAIM_HEARTBEAT_S = int(os.environ.get("CLAIM_HEARTBEAT", "300"))  # renew every 5 min while the agent runs
 
 SBCACHE_TTL = int(os.environ.get("TAUCETI_META_TTL", "120"))  # seconds a cached scoreboard meta stays fresh
+
+# How long a cached comment read may be served on the strength of the PR's `updatedAt` alone (see
+# ReviewState.observe). Nothing about a PR's comments can change without GitHub bumping that clock —
+# measured over 179 in-place scoreboard edits, none landed newer than their PR's `updatedAt` — with the
+# one exception it cannot express: a DELETED comment leaves no timestamp behind. This backstop is the
+# bound on that blind spot, so a deleted or forged scoreboard is refetched within half an hour even
+# though nothing announced it. Deliberately not "until the next reset": a heuristic we cannot verify
+# gets a ceiling. A read served under this rule is `assumed`, never `fresh`, and cannot authorize a
+# mutation; see dispatch()'s revalidation of the one PR a round acts on.
+SBCACHE_BACKSTOP_S = int(os.environ.get("TAUCETI_META_BACKSTOP", "1800"))
 
 COMMENTS_MEMO_S = 5  # in-memory window over which one survey pass coalesces its issue-comment fetches
 
@@ -237,6 +288,12 @@ WORK_TASKS = list(ALLOWED_TASKS)
 # is the final fallback and is handled separately after these stages. The durable attempt breaker
 # keeps a stuck or rejected progress report from burning every round.
 AUTO_STAGES = ("rebase", "bump", "progress", "fix-ci", "fix", "review")
+
+# The work units that act on an EXISTING pull request, and so are the ones `--pr` can target. The two
+# left out cannot be named by a PR number at all: `progress` writes a roadmap's generated reports
+# rather than touching a PR of ours, and `roadmap` opens a PR that does not exist yet. Both carry a
+# pr=0 candidate, which is why no `--pr` value is allowed to be 0.
+PR_TASKS = ("rebase", "bump", "fix-ci", "fix", "review")
 
 # The "#" shown in the survey table IS the key you press in the TUI to run one round of that kind.
 # ALLOWED_TASKS deliberately stays the stable display/key order; AUTO_STAGES is the unrestricted

@@ -39,8 +39,10 @@ RUN_STDLIB=(
   codex_account.py
   codex_fallback.py
   contest_claim.py
+  dispatch_revalidation.py
   fix_diagnostic.py
   fork_authoring.py
+  github_failure_reason.py
   github_ratelimit.py
   host_agent_preflight.py
   ignore_quota_hardblock.py
@@ -55,7 +57,9 @@ RUN_STDLIB=(
   mirror_creds_macos.py
   oauth_refresh_loop.py
   observed_process.py
+  open_pr_pages.py
   pace_curve.py
+  pr_targeting.py
   preflight_review_lake.py
   progress_tool_failure_log.py
   productive_continuation.py
@@ -64,6 +68,7 @@ RUN_STDLIB=(
   quota_auto_refresh.py
   quota_cache_fp.py
   quota_loop_refresh.py
+  rebase_handoff.py
   review_sync_failure.py
   quota_claude_bootstrap.py
   quota_claude_windows.py
@@ -78,6 +83,8 @@ RUN_STDLIB=(
   review_incomplete.py
   review_provider_down.py
   review_scope.py
+  review_scheduling.py
+  review_state_freshness.py
   review_throttles.py
   roadmap_backpressure.py
   roadmap_claims.py

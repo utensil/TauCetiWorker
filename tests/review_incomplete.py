@@ -22,6 +22,8 @@ survey_module = importlib.import_module("tauceti_worker.survey")
 
 class FakeRS(ReviewState):
     def __init__(self, states, runs):
+        self._observed = {}
+        self._comments = {}
         self.metadata = {"head_sha": "H", "states": states, "runs": runs}
 
     def gh_meta(self, _pr):
@@ -75,7 +77,7 @@ with (
     patch.object(survey_module, "progress_due", return_value=(False, "fixture not due")),
 ):
     cfg = SimpleNamespace(wid="fixture", state=Path(directory) / "state", store_dir=Path(directory) / "store")
-    gh = SimpleNamespace(pr_list=lambda _fields: [raw_pr], fresh_claim_age=lambda _cid: None)
+    gh = SimpleNamespace(open_prs=lambda: [raw_pr], fresh_claim_age=lambda _cid: None)
     counters = SimpleNamespace(read=lambda _key: 0)
     for name, states, verdicts, expected_review, expected_fix in cases:
         rs = FakeRS(states, [{"verdict": verdict} for verdict in verdicts])

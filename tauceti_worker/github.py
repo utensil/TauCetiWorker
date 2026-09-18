@@ -11,24 +11,24 @@ import subprocess
 import time
 from pathlib import Path
 
-from .config import Die, log
+from .config import Die, log, one_line
 from .constants import (
     _GH_PRIMARY_RE,
     _GH_SECONDARY_RE,
+    _GH_TRANSIENT_RE,
+    _GQL_MUTATION_RE,
     CLAIMS,
     CONTEST_CLAIM_EMOJI,
     GH_COMMAND_TIMEOUT,
     GH_INROUND_WAIT,
     GH_SECONDARY_BASE,
+    GH_TRANSIENT_BASE,
+    GH_TRANSIENT_TRIES,
+    OPEN_PR_MAX_PAGES,
+    OPEN_PR_PAGE,
     TAUCETI,
 )
-
-_GH_TRANSIENT_RE = re.compile(
-    r"unexpected (?:EOF|end of JSON input)|stream error:|connection reset by peer|"
-    r"TLS handshake timeout|HTTP 5(?:00|02|03|04)\b",
-    re.I,
-)
-_GH_TRANSIENT_RETRIES = 2
+from .review_diagnostics import public_diagnostic_quality
 
 
 @functools.lru_cache(maxsize=1)
@@ -247,6 +247,55 @@ def _gh_rate_kind(text: str) -> str | None:
     return None
 
 
+_GH_READ_VERBS = frozenset({"list", "view", "status", "checks", "diff", "search"})
+
+
+def _gh_transient(text: str) -> bool:
+    """Whether a failed `gh` call reads as the transport or the server giving out, rather than as an
+    answer about our request (see _GH_TRANSIENT_RE)."""
+    return bool(_GH_TRANSIENT_RE.search(text))
+
+
+def _gh_read_only(argv: list[str]) -> bool:
+    """Whether this invocation only READS.
+
+    A transient failure is ambiguous in a way a rate limit is not: a rejected request certainly did not
+    run, but a 504 may mean GitHub applied the change and lost the response on the way back. Retrying a
+    read costs a duplicate query; retrying `issue create` or `api -X PATCH` costs a duplicate issue or a
+    change applied twice. So only reads are retried, decided from the command line rather than from a
+    flag each caller could forget to pass."""
+    args = [a for a in argv[1:] if a]  # drop the `gh` program name
+    if not args:
+        return False
+    if args[0] == "api":
+        rest = args[1:]
+        if rest[:1] == ["graphql"]:
+            # Every GraphQL call is a POST, so the method says nothing about what it does; the document
+            # does. A `query` reads and may be retried, a `mutation` writes and may not. An invocation
+            # whose document we cannot see (--input, a file) is treated as a write.
+            docs = [a[len("query=") :] for a in rest[1:] if a.startswith("query=")]
+            return bool(docs) and all(
+                re.match(r"\A\s*(?:#[^\n]*\n\s*)*(?:query\b|\{)", d) and not _GQL_MUTATION_RE.search(d) for d in docs
+            )
+        # `gh api` is GET unless told otherwise, and a field/body argument makes it a POST implicitly.
+        for i, a in enumerate(rest):
+            if a in ("-X", "--method"):
+                if i + 1 >= len(rest) or rest[i + 1].upper() != "GET":
+                    return False
+            elif a.startswith("-X"):
+                if a[2:].upper() != "GET":
+                    return False
+            elif a.startswith("--method="):
+                if a.split("=", 1)[1].upper() != "GET":
+                    return False
+            elif a in ("--field", "--raw-field", "--input") or a.startswith(
+                ("-f", "-F", "--field=", "--raw-field=", "--input=")
+            ):
+                return False
+        return True
+    return len(args) > 1 and args[1] in _GH_READ_VERBS
+
+
 def github_budget() -> dict | None:
     """Per-bucket (remaining, reset_epoch) from GitHub's rate_limit endpoint, keyed 'core' and 'graphql'
     — the two buckets a round spends (REST and the progress-guard GraphQL query). That endpoint is itself
@@ -290,14 +339,21 @@ def gh_run(
     *,
     cwd: Path | None = None,
     max_wait: int = GH_INROUND_WAIT,
-    retry_transient: bool = False,
+    retry_transient: bool | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a `gh` command, waiting out a SECONDARY GitHub rate limit IN PLACE and retrying so the limit
     costs a pause, not a discarded round (bounded by max_wait so it can't blow ROUND_TIMEOUT). A PRIMARY
     (hourly) limit is surfaced immediately — waiting an hour inside a round under the 90-min cap would
-    just be SIGKILLed; the loop preflight waits that reset out instead. Any non-rate-limit failure is
-    returned unchanged for the caller to handle as before. Transport/server retries are opt-in because
-    retrying a mutating request after an ambiguous disconnect could duplicate the mutation."""
+    just be SIGKILLed; the loop preflight waits that reset out instead.
+
+    A TRANSIENT failure of a READ (a 5xx, a truncated body, a dropped connection) is retried a few
+    seconds later, up to GH_TRANSIENT_TRIES times. Any other failure is returned unchanged for the
+    caller to handle as before."""
+    # None follows upstream's automatic read detection; explicit callers retain the fork's
+    # opt-in/opt-out contract and short retry budget.
+    retry_read = _gh_read_only(argv) if retry_transient is None else retry_transient
+    transient_tries = 2 if retry_transient is True else GH_TRANSIENT_TRIES
+    transient_base = 2 if retry_transient is True else GH_TRANSIENT_BASE
     waited = 0
     secondary_attempt = 0
     transient_attempt = 0
@@ -320,19 +376,16 @@ def gh_run(
         text = (p.stderr or "") + "\n" + (p.stdout or "")
         kind = _gh_rate_kind(text)
         if kind is None:
-            if retry_transient and _GH_TRANSIENT_RE.search(text) and transient_attempt < _GH_TRANSIENT_RETRIES:
-                nap = 2 * (1 << transient_attempt)
-                if waited + nap > max_wait:
-                    return p
-                log(
-                    f"gh: transient GitHub transport/server failure — waiting {nap}s, then retrying "
-                    f"({' '.join(argv[1:3])})"
-                )
-                time.sleep(nap)
-                waited += nap
-                transient_attempt += 1
-                continue
-            return p
+            if not (_gh_transient(text) and retry_read) or transient_attempt >= transient_tries:
+                return p
+            nap = transient_base << transient_attempt
+            if waited + nap > max_wait:
+                return p
+            log(f"gh: {one_line(text, 120)} — transient, retrying in {nap}s ({' '.join(argv[1:3])})")
+            time.sleep(nap)
+            waited += nap
+            transient_attempt += 1
+            continue
         if kind == "primary":
             log(
                 "gh: primary rate limit — surfacing so the round backs off and the loop preflight "
@@ -357,12 +410,177 @@ def gh_run(
 # ============================================================================
 
 
+# The survey's open-PR page. Only the fields PRInfo reads, and for the head's status ONLY the commit
+# status contexts — never a check run. That distinction is load-bearing and predates this query: a
+# check-run reflects a job's outcome and can go red on an infra hiccup while the authoritative `build`
+# status is green (see PRInfo.from_json). `statusCheckRollup` mixes both and costs an order of
+# magnitude more; `commits(last:1)` is the head, whose status is the one that gates the PR.
+_OPEN_PRS_QUERY = """query($owner:String!,$repo:String!,$n:Int!,$cursor:String){
+  repository(owner:$owner,name:$repo){
+    pullRequests(states:OPEN,first:$n,after:$cursor,orderBy:{field:CREATED_AT,direction:ASC}){
+      pageInfo{hasNextPage endCursor}
+      nodes{
+        number title body isDraft mergeable updatedAt headRefOid headRefName
+        headRepositoryOwner{login} headRepository{name}
+        author{login __typename}
+        labels(first:50){totalCount nodes{name}}
+        commits(last:1){nodes{commit{status{contexts{context state createdAt}}}}}
+      }
+    }
+  }
+}"""
+
+
+def _open_pr_index_query(fields: tuple[str, ...]) -> str:
+    """Build the bounded field selection used by scoped review and publication checks."""
+    selections = ["number"]
+    if "body" in fields:
+        selections.append("body")
+    if "author" in fields:
+        selections.append("author{login __typename}")
+    if "labels" in fields:
+        selections.append("labels(first:50){totalCount nodes{name}}")
+    return f"""query($owner:String!,$repo:String!,$n:Int!,$cursor:String){{
+  repository(owner:$owner,name:$repo){{
+    pullRequests(states:OPEN,first:$n,after:$cursor,orderBy:{{field:CREATED_AT,direction:ASC}}){{
+      pageInfo{{hasNextPage endCursor}}
+      nodes{{{" ".join(selections)}}}
+    }}
+  }}
+}}"""
+
+
+def _pr_json_from_graphql(node: dict) -> dict:
+    """One GraphQL PR node in `gh pr list --json` shape, so PRInfo.from_json stays the single place
+    that decides what a PR's fields MEAN.
+
+    Only the spellings gh normalizes need translating: it flattens `labels`/`contexts` out of their
+    connections, renames a status context's `createdAt` to `startedAt`, and reports a Bot author as
+    `is_bot` with an `app/`-prefixed login rather than as a bare `__typename`. Nothing downstream reads
+    the prefix, but matching gh exactly is what lets the two paths be compared field for field."""
+    commits = (node.get("commits") or {}).get("nodes") or [{}]
+    status = ((commits[0] or {}).get("commit") or {}).get("status") or {}
+    author = node.get("author") or {}
+    is_bot = author.get("__typename") == "Bot"
+    login = author.get("login", "")
+    return {
+        **{
+            k: node.get(k)
+            for k in ("number", "title", "body", "isDraft", "mergeable", "updatedAt", "headRefOid", "headRefName")
+        },
+        "headRepositoryOwner": node.get("headRepositoryOwner") or {},
+        "headRepository": node.get("headRepository") or {},
+        "author": {"login": f"app/{login}" if is_bot and login else login, "is_bot": is_bot},
+        "labels": list((node.get("labels") or {}).get("nodes") or []),
+        "statusCheckRollup": [
+            {"context": c.get("context"), "state": c.get("state"), "startedAt": c.get("createdAt")}
+            for c in (status.get("contexts") or [])
+        ],
+    }
+
+
 class GitHub:
     def __init__(self, repo: str = TAUCETI):
         self.repo = repo
 
-    def _gh(self, args: list[str], *, retry_transient: bool = False) -> subprocess.CompletedProcess:
+    def _gh(self, args: list[str], *, retry_transient: bool | None = None) -> subprocess.CompletedProcess:
         return gh_run(["gh", *args], retry_transient=retry_transient)
+
+    def open_prs(self, *, page: int = OPEN_PR_PAGE) -> list[dict]:
+        """Every open PR, paged, in the same shape `gh pr list --json` returns (so PRInfo.from_json
+        reads either).
+
+        This is the query that opens every round, and `gh pr list` is the wrong shape for it at any
+        size. It asks for `statusCheckRollup` — every check run and status context on every PR's head —
+        when the survey reads exactly one thing out of that rollup: the `build` commit status. The
+        rollup made one request whose server-side cost grew with the project, until at ~100 open PRs it
+        ran ~10s against a gateway that gives up around 11 and failed about a quarter of the time. Its
+        `--limit` was the other half of the problem: a limit is a silent truncation, so past it the
+        survey would have started quietly missing PRs, which is worse than failing.
+
+        Asking for the status contexts alone puts a page of 100 at ~3s, and paging puts a ceiling on
+        what any ONE request costs, independent of how many PRs are open. The work still grows with the
+        project, but it grows as more small requests rather than as one request drifting towards a
+        timeout, and each page is retried on its own (see gh_run)."""
+        owner, _, name = self.repo.partition("/")
+        out: list[dict] = []
+        seen: set[int] = set()
+        cursor = None
+        for _ in range(OPEN_PR_MAX_PAGES):
+            args = ["api", "graphql", "-F", f"owner={owner}", "-F", f"repo={name}", "-F", f"n={page}"]
+            if cursor:
+                args += ["-F", f"cursor={cursor}"]
+            p = self._gh([*args, "-f", f"query={_OPEN_PRS_QUERY}"])
+            if p.returncode != 0:
+                raise GitHubError(f"open PR query failed: {one_line(p.stderr or p.stdout, 160)}")
+            try:
+                conn = json.loads(p.stdout)["data"]["repository"]["pullRequests"]
+            except (ValueError, TypeError, KeyError) as e:
+                raise GitHubError(f"open PR query returned no pull requests ({e})") from e
+            for node in conn.get("nodes") or []:
+                # Same principle as the page cap, one level down: a PR carrying more labels than we
+                # asked for would come back quietly short, and the status pipeline reads labels.
+                labels = node.get("labels") or {}
+                if labels.get("totalCount", 0) > len(labels.get("nodes") or []):
+                    raise GitHubError(
+                        f"open PR query returned truncated labels for PR #{node.get('number')} (more than 50 labels)"
+                    )
+                # Ordered by creation, which never changes, so a PR updated mid-scan cannot reorder
+                # itself across a page boundary. Dedupe anyway: a skipped PR is invisible work, and
+                # this is the one place that would hide it.
+                if node and node.get("number") not in seen:
+                    seen.add(node["number"])
+                    out.append(_pr_json_from_graphql(node))
+            info = conn.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                return out
+            cursor = info.get("endCursor")
+        # Refusing here is the point: the alternative is returning a truncated list that reads as the
+        # whole project, which is exactly the failure `--limit` used to hide.
+        raise GitHubError(f"open PR query exceeded {OPEN_PR_MAX_PAGES} pages of {page} ({len(out)} PRs so far)")
+
+    def open_pr_index(self, fields: tuple[str, ...] = ("number",)) -> list[dict]:
+        """Return a complete, paginated open-PR index with only the requested scope fields.
+
+        This is deliberately separate from ``open_prs``: scoped review and publication guards need
+        number/body/author/labels, but do not need heads, mergeability, or build status. A bounded page
+        keeps those checks from falling back to the old ``gh pr list --limit 200`` truncation.
+        """
+        allowed = {"number", "body", "author", "labels"}
+        requested = tuple(dict.fromkeys(fields))
+        unknown = set(requested) - allowed
+        if unknown:
+            raise ValueError(f"unsupported open PR index field(s): {', '.join(sorted(unknown))}")
+        query = _open_pr_index_query(requested)
+        owner, _, name = self.repo.partition("/")
+        out: list[dict] = []
+        seen: set[int] = set()
+        cursor = None
+        for _ in range(OPEN_PR_MAX_PAGES):
+            args = ["api", "graphql", "-F", f"owner={owner}", "-F", f"repo={name}", "-F", f"n={OPEN_PR_PAGE}"]
+            if cursor:
+                args += ["-F", f"cursor={cursor}"]
+            p = self._gh([*args, "-f", f"query={query}"])
+            if p.returncode != 0:
+                raise GitHubError(f"open PR index query failed: {one_line(p.stderr or p.stdout, 160)}")
+            try:
+                conn = json.loads(p.stdout)["data"]["repository"]["pullRequests"]
+            except (ValueError, TypeError, KeyError) as e:
+                raise GitHubError(f"open PR index query returned no pull requests ({e})") from e
+            for node in conn.get("nodes") or []:
+                labels = node.get("labels") or {}
+                if labels.get("totalCount", 0) > len(labels.get("nodes") or []):
+                    raise GitHubError(
+                        f"open PR index returned truncated labels for PR #{node.get('number')} (more than 50 labels)"
+                    )
+                if node and node.get("number") not in seen:
+                    seen.add(node["number"])
+                    out.append(_pr_json_from_graphql(node))
+            info = conn.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                return out
+            cursor = info.get("endCursor")
+        raise GitHubError(f"open PR index query exceeded {OPEN_PR_MAX_PAGES} pages ({len(out)} PRs so far)")
 
     def pr_list(self, fields: list[str], *, author: str | None = None, state: str = "open") -> list[dict]:
         args = ["pr", "list", "--repo", self.repo, "--state", state, "--limit", "200", "--json", ",".join(fields)]
@@ -452,12 +670,12 @@ class GitHub:
             if matches:
                 issue = matches[0]
                 existing_body = issue.get("body") if isinstance(issue.get("body"), str) else ""
-                # The issue is fleet-wide but retained diagnostics are per-worker. Once any worker
-                # has supplied an allow-listed diagnostic, do not let peers continually overwrite
-                # it with their own attempt or a generic bubble failure. We still upgrade an older
-                # issue that has no public diagnostic at all.
+                # Keep equally useful peer reports stable, but let an actual diagnosis
+                # replace "review command failed". The comparison uses fixed public
+                # categories only; raw subprocess output never crosses this boundary.
                 has_public_diagnostic = "Latest allow-listed worker diagnostics:" in existing_body
-                if existing_body != body and not has_public_diagnostic:
+                better = public_diagnostic_quality(body) > public_diagnostic_quality(existing_body)
+                if existing_body != body and (not has_public_diagnostic or better):
                     self._gh(
                         [
                             "issue",
@@ -473,6 +691,34 @@ class GitHub:
             self._gh(["issue", "create", "--repo", self.repo, "--title", title, "--body", body])
         except Exception:
             pass
+
+    def rebase_requested(self, pr: int, head: str) -> bool:
+        """A trusted sweep handoff for this exact head; stale requests spend no attempts."""
+        if not re.fullmatch(r"[0-9a-f]{40}", head):
+            return False
+        p = self._gh(
+            [
+                "api",
+                "--paginate",
+                f"/repos/{self.repo}/issues/{pr}/comments?per_page=100",
+                "--jq",
+                ".[] | {body, author: .user.login}",
+            ]
+        )
+        if p.returncode != 0:
+            return False
+        try:
+            comments = [json.loads(line) for line in (p.stdout or "").splitlines() if line.strip()]
+        except (ValueError, TypeError):
+            return False
+        return any(
+            isinstance(c, dict)
+            and c.get("author") == "tauceti-review-bot[bot]"
+            and isinstance(c.get("body"), str)
+            and c["body"].startswith("Merge-queue recovery for head `")
+            and f"<!--tauceti-rebase:v1 {head}-->" in (c.get("body") or "").splitlines()
+            for c in comments
+        )
 
     def issue_comments(self, pr: int) -> list[dict] | None:
         """All issue comments for a PR (paginated). None on fetch failure (distinct from empty)."""

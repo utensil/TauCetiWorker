@@ -13,6 +13,7 @@ list is in `tauceti work -h`. For persistent workers, see
 | `--tend-scope {author,owned}` | Maintenance PR scope. `author` is legacy author-wide behavior; `owned` tends only PRs recorded for this worker id (fail-closed when its local record is absent or invalid). |
 | `--retry-exhausted-fixes` | Remove the per-head attempt ceiling for blocking `fix` candidates; requires `--tend-scope owned` and is inherited by loop rounds. |
 | `--skip TASKS` | Drop a comma list of tasks from the cascade. Combines with `--only` by subtraction. |
+| `--pr N[,N...]` | Work only on these pull requests (comma list or repeated flag; a leading `#` is accepted). A filter over what the round would already have done: it can never make a PR actionable that the survey passed over, and never bypasses branch claims, attempt budgets, the daily review cap, or a peer's in-progress review. Intersects with `--only` and the fork review scopes (`--review-roadmap`, `--review-pr`, `--review-author`); `progress` and `roadmap` name no existing PR, so a targeted round drops them rather than falling through to unrelated work, and it makes no GitHub writes about PRs you did not name. When none of the named PRs are actionable the round reports why for each one and exits without progress. An empty or unreadable value (`--pr ""`, `--pr ,,`) is an error rather than silently no targeting. |
 | `--agent AGENT` | `auto` (default), `codex`, `claude`, `kiro`, `deepseek`, or `minimax`. Kiro and OpenRouter providers are explicit-only and unpaced. |
 | `--author-model MODEL` | Exact authoring model for an explicit provider (CLI > provider environment > committed default). |
 | `--author-effort EFFORT` | Authoring reasoning effort for an explicit Codex, Claude, or Kiro provider. |
@@ -92,6 +93,12 @@ accounts, or coordinate with someone whose intentions you are fulfilling, list
 those logins with `--roadmap-extra-identities` so the worker does not avoid your
 own side's claims. This is cooperative and fail-open;
 `--ignore-claims` or `TAUCETI_RESPECT_CLAIMS=false` opts out.
+
+An assigned intention with the maintainer-applied `administrative-hold` label is different: every
+worker avoids its scope, even when authenticated as the assignee and even with `--ignore-claims`.
+Reading these holds is fail-closed, so a GitHub error stops roadmap authoring. The hold remains tied
+to the normal intentions lifecycle: when its dated claim expires, the bot clears the assignee and
+the hold becomes inactive.
 
 ## Codex model selection
 
@@ -173,6 +180,7 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `TAUCETI_ROADMAP_SKIP` | _(unset)_ | Comma-separated roadmap areas to exclude, for `--roadmap-skip`. |
 | `TAUCETI_ROADMAP_EXTRA_IDENTITIES` | _(unset)_ | Comma-separated extra GitHub logins whose claimed intentions count as the worker's own. |
 | `TAUCETI_RESPECT_CLAIMS` | `true` | Whether roadmap workers avoid others' claimed intentions; `false` is the same as `--ignore-claims`. |
+| `TAUCETI_PR` | _(unset)_ | Comma-separated pull request numbers for `--pr`. |
 | `TAUCETI_QUOTA_CMD` | — | Default for `--quota-cmd`. |
 | `TAUCETI_RETRY_EXHAUSTED_FIXES` | _(unset)_ | Environment form of `--retry-exhausted-fixes` (unlimited owned fix retries); accepted only for an owned maintenance worker. |
 | `TAUCETI_AUTO_REFRESH` | _(unset)_ | `1` is the same as `--auto-refresh`. |
@@ -183,6 +191,8 @@ Flags win over these. Most are tuning knobs with sane defaults.
 | `MATHLIB_CACHE_DIR` | `<worker state>/.cache/mathlib` | Where this worker downloads Mathlib artifacts. Private, because `lake exe cache get` takes no lock; finished files are exchanged with the machine pool by hardlink before each round. |
 | `TAUCETI_MATHLIB_POOL` | `$XDG_CACHE_HOME/mathlib`, else login user's `~/.cache/mathlib` | The pool those hardlinks go to and come from. |
 | `LAKE_CACHE_DIR` | `<worker state>/.cache/lake` | Lake's own build-output cache. Per-worker: unlike a toolchain install it is written throughout a build. |
+| `LAKE_ARTIFACT_CACHE` | `1` | Keep local build outputs in Lake's artifact store so later rounds can reuse them. |
+| `LAKE_RESTORE_ARTIFACTS` | `1` | Copy artifact-store hits into the build directory for TauCeti's post-build audits. |
 | `TAUCETI_CLAUDE_CMD` | `claude` | The `claude` executable for host rounds; split as a shell word list, the usual flags appended. |
 | `TAUCETI_INHERIT_CLAUDE_CONFIG` | _(unset)_ | `1` gives an isolated worker your own `CLAUDE.md`, `settings.json`, and skills instead of its own. Off by default: a round should not depend on whose config dir it ran from, and personal instructions can contradict the task prompt. |
 | `TAUCETI_AUTHORING_CODEX_MODEL` / `TAUCETI_AUTHORING_CODEX_EFFORT` | `gpt-5.6-sol` (Terra fallback) / `high` | Codex authoring profile. An explicit model disables automatic fallback; unrelated host configuration remains available. |
