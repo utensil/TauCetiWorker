@@ -677,11 +677,7 @@ def survey(
         ),
     )
     try:
-        raw = (
-            scoped_review_pr_json(gh, scope_roadmaps, scope_prs, scope_authors)
-            if use_scoped_query
-            else gh.pr_list(list(PR_QUERY_FIELDS))
-        )
+        raw = scoped_review_pr_json(gh, scope_roadmaps, scope_prs, scope_authors) if use_scoped_query else gh.open_prs()
     except GitHubError as e:
         sv.github_failed = True
         sv.errors.append(str(e))

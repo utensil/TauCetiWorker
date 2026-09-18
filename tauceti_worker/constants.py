@@ -158,6 +158,11 @@ GH_COMMAND_TIMEOUT = int(os.environ.get("TAUCETI_GH_COMMAND_TIMEOUT", "120"))
 
 GH_SECONDARY_BASE = 60  # first secondary-limit sleep when no Retry-After is given (then exponential)
 
+# The open-PR survey pages instead of requesting the whole project in one expensive GraphQL response.
+# Keep both bounds configurable while refusing to silently truncate the survey.
+OPEN_PR_PAGE = int(os.environ.get("TAUCETI_OPEN_PR_PAGE", "100"))  # PRs per request (GitHub's maximum)
+OPEN_PR_MAX_PAGES = int(os.environ.get("TAUCETI_OPEN_PR_MAX_PAGES", "100"))
+
 _GH_PRIMARY_RE = re.compile(r"(?:API )?rate limit exceeded|rate limit.*exceeded", re.I)
 
 _GH_SECONDARY_RE = re.compile(r"secondary rate limit|abuse detection", re.I)

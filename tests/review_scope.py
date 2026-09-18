@@ -261,6 +261,7 @@ class FakeGH:
         self.full = list(full)
         self.list_calls = []
         self.view_calls = []
+        self.open_calls = 0
 
     def pr_list(self, fields):
         self.list_calls.append(tuple(fields))
@@ -270,6 +271,10 @@ class FakeGH:
             tc.PR_SCOPE_UNION_INDEX_FIELDS,
         ):
             return self.index
+        return self.full
+
+    def open_prs(self):
+        self.open_calls += 1
         return self.full
 
     def pr_view_required(self, number, fields):
@@ -411,7 +416,7 @@ try:
         review_scope_prs=[2],
         scoped_review_only=False,
     )
-    check("non-review-only scope preserves full upstream query", gh.list_calls, [tc.PR_QUERY_FIELDS])
+    check("non-review-only scope uses the paged open-PR survey", gh.open_calls, 1)
     check("non-review-only scope still filters review selection", [c.pr for c in sv.reviewable.actionable], [2])
 finally:
     survey_module.me = old_me
