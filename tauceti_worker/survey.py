@@ -448,7 +448,7 @@ def scoped_review_pr_json(gh: GitHub, roadmaps: list[str], prs: list[int], autho
             if roadmaps
             else PR_AUTHOR_SCOPE_INDEX_FIELDS
         )
-        for item in gh.pr_list(list(index_fields)):
+        for item in gh.open_pr_index(tuple(index_fields)):
             info = PRInfo.from_json(item)
             area_match = bool(areas.intersection(area.casefold() for area in pr_roadmap_areas(info)))
             if area_match or info.author.casefold() in author_logins:

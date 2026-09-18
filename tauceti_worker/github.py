@@ -431,6 +431,25 @@ _OPEN_PRS_QUERY = """query($owner:String!,$repo:String!,$n:Int!,$cursor:String){
 }"""
 
 
+def _open_pr_index_query(fields: tuple[str, ...]) -> str:
+    """Build the bounded field selection used by scoped review and publication checks."""
+    selections = ["number"]
+    if "body" in fields:
+        selections.append("body")
+    if "author" in fields:
+        selections.append("author{login __typename}")
+    if "labels" in fields:
+        selections.append("labels(first:50){totalCount nodes{name}}")
+    return f"""query($owner:String!,$repo:String!,$n:Int!,$cursor:String){{
+  repository(owner:$owner,name:$repo){{
+    pullRequests(states:OPEN,first:$n,after:$cursor,orderBy:{{field:CREATED_AT,direction:ASC}}){{
+      pageInfo{{hasNextPage endCursor}}
+      nodes{{{" ".join(selections)}}}
+    }}
+  }}
+}}"""
+
+
 def _pr_json_from_graphql(node: dict) -> dict:
     """One GraphQL PR node in `gh pr list --json` shape, so PRInfo.from_json stays the single place
     that decides what a PR's fields MEAN.
@@ -486,7 +505,6 @@ class GitHub:
         owner, _, name = self.repo.partition("/")
         out: list[dict] = []
         seen: set[int] = set()
-        truncated: list[int] = []
         cursor = None
         for _ in range(OPEN_PR_MAX_PAGES):
             args = ["api", "graphql", "-F", f"owner={owner}", "-F", f"repo={name}", "-F", f"n={page}"]
@@ -504,7 +522,9 @@ class GitHub:
                 # asked for would come back quietly short, and the status pipeline reads labels.
                 labels = node.get("labels") or {}
                 if labels.get("totalCount", 0) > len(labels.get("nodes") or []):
-                    truncated.append(node.get("number"))
+                    raise GitHubError(
+                        f"open PR query returned truncated labels for PR #{node.get('number')} (more than 50 labels)"
+                    )
                 # Ordered by creation, which never changes, so a PR updated mid-scan cannot reorder
                 # itself across a page boundary. Dedupe anyway: a skipped PR is invisible work, and
                 # this is the one place that would hide it.
@@ -513,13 +533,54 @@ class GitHub:
                     out.append(_pr_json_from_graphql(node))
             info = conn.get("pageInfo") or {}
             if not info.get("hasNextPage"):
-                if truncated:
-                    log(f"open PR query: {len(truncated)} PR(s) carry more than 50 labels, e.g. #{truncated[0]}")
                 return out
             cursor = info.get("endCursor")
         # Refusing here is the point: the alternative is returning a truncated list that reads as the
         # whole project, which is exactly the failure `--limit` used to hide.
         raise GitHubError(f"open PR query exceeded {OPEN_PR_MAX_PAGES} pages of {page} ({len(out)} PRs so far)")
+
+    def open_pr_index(self, fields: tuple[str, ...] = ("number",)) -> list[dict]:
+        """Return a complete, paginated open-PR index with only the requested scope fields.
+
+        This is deliberately separate from ``open_prs``: scoped review and publication guards need
+        number/body/author/labels, but do not need heads, mergeability, or build status. A bounded page
+        keeps those checks from falling back to the old ``gh pr list --limit 200`` truncation.
+        """
+        allowed = {"number", "body", "author", "labels"}
+        requested = tuple(dict.fromkeys(fields))
+        unknown = set(requested) - allowed
+        if unknown:
+            raise ValueError(f"unsupported open PR index field(s): {', '.join(sorted(unknown))}")
+        query = _open_pr_index_query(requested)
+        owner, _, name = self.repo.partition("/")
+        out: list[dict] = []
+        seen: set[int] = set()
+        cursor = None
+        for _ in range(OPEN_PR_MAX_PAGES):
+            args = ["api", "graphql", "-F", f"owner={owner}", "-F", f"repo={name}", "-F", f"n={OPEN_PR_PAGE}"]
+            if cursor:
+                args += ["-F", f"cursor={cursor}"]
+            p = self._gh([*args, "-f", f"query={query}"])
+            if p.returncode != 0:
+                raise GitHubError(f"open PR index query failed: {one_line(p.stderr or p.stdout, 160)}")
+            try:
+                conn = json.loads(p.stdout)["data"]["repository"]["pullRequests"]
+            except (ValueError, TypeError, KeyError) as e:
+                raise GitHubError(f"open PR index query returned no pull requests ({e})") from e
+            for node in conn.get("nodes") or []:
+                labels = node.get("labels") or {}
+                if labels.get("totalCount", 0) > len(labels.get("nodes") or []):
+                    raise GitHubError(
+                        f"open PR index returned truncated labels for PR #{node.get('number')} (more than 50 labels)"
+                    )
+                if node and node.get("number") not in seen:
+                    seen.add(node["number"])
+                    out.append(_pr_json_from_graphql(node))
+            info = conn.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                return out
+            cursor = info.get("endCursor")
+        raise GitHubError(f"open PR index query exceeded {OPEN_PR_MAX_PAGES} pages ({len(out)} PRs so far)")
 
     def pr_list(self, fields: list[str], *, author: str | None = None, state: str = "open") -> list[dict]:
         args = ["pr", "list", "--repo", self.repo, "--state", state, "--limit", "200", "--json", ",".join(fields)]

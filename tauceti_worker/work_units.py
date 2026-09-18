@@ -615,7 +615,7 @@ def log_round_file_changes(cfg: Config, pre_head: str | None) -> None:
 
 def _open_pr_numbers(w: Worker) -> set[int] | None:
     try:
-        return {p["number"] for p in w.gh.pr_list(["number"], state="open")}
+        return {p["number"] for p in w.gh.open_pr_index(("number",))}
     except GitHubError:
         return None
 

@@ -276,6 +276,10 @@ class FakeGH:
             return self.index
         return self.full
 
+    def open_pr_index(self, fields):
+        self.list_calls.append(tuple(fields))
+        return self.index
+
     def pr_view_required(self, number, fields):
         self.view_calls.append((number, tuple(fields)))
         value = self.views[number]

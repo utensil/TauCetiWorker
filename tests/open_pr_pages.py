@@ -118,6 +118,24 @@ check("the second page follows the first's cursor", [a for a in gh.calls[1] if a
 gh = FakeGH([page([node(1), node(2)], more=True), page([node(2), node(3)])])
 check("a PR repeated across pages appears once", [d["number"] for d in gh.open_prs()], [1, 2, 3])
 
+# Scoped review and roadmap publication checks use the same bounded paging discipline, but request
+# only their index fields rather than the full build/status payload.
+gh = FakeGH([page([node(10)], more=True, cursor="I1"), page([node(11)])])
+check("the lightweight index follows every page", [d["number"] for d in gh.open_pr_index(("number",))], [10, 11])
+check("the lightweight index keeps its field selection", "body" not in gh.calls[0][-1], True)
+
+# A partial label connection is unsafe: a roadmap/hold/review label beyond the first 50 can change the
+# work classification, so both full and index surveys fail closed instead of returning a partial PR.
+too_many_labels = node(12)
+too_many_labels["labels"] = {"totalCount": 51, "nodes": [{"name": f"label-{i}"} for i in range(50)]}
+for operation in ("full", "index"):
+    gh = FakeGH([page([too_many_labels])])
+    try:
+        (gh.open_prs() if operation == "full" else gh.open_pr_index(("number", "labels")))
+        check(f"{operation} survey rejects truncated labels", False, True)
+    except tc.GitHubError as e:
+        check(f"{operation} survey rejects truncated labels", "truncated labels" in str(e), True)
+
 # --- refusing to truncate ---------------------------------------------------
 # The whole point of paging: a survey that cannot see every open PR must FAIL, because a short list
 # reads exactly like a quiet project and would silently drop work.
