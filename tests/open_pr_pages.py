@@ -19,6 +19,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import tauceti_worker as tc
+from tauceti_worker.survey import scoped_review_pr_json, target_marker_focuses
 
 fails = 0
 
@@ -123,6 +124,50 @@ check("a PR repeated across pages appears once", [d["number"] for d in gh.open_p
 gh = FakeGH([page([node(10)], more=True, cursor="I1"), page([node(11)])])
 check("the lightweight index follows every page", [d["number"] for d in gh.open_pr_index(("number",))], [10, 11])
 check("the lightweight index keeps its field selection", "body" not in gh.calls[0][-1], True)
+
+marker = '<!--tauceti-target:v1 {"focus":"RepresentationTheory"}-->'
+for description, fields, expected in (
+    ("missing", {}, ()),
+    ("null", {"body": None}, ()),
+    ("empty", {"body": ""}, ()),
+    ("marker", {"body": marker}, ("RepresentationTheory",)),
+):
+    gh = FakeGH([page([{"number": 20, **fields}])])
+    item = gh.open_pr_index(("number", "body"))[0]
+    check(f"{description} body presence is preserved", "body" in item, "body" in fields)
+    check(f"{description} body parses", tc.PRInfo.from_json(item).target_focuses, expected)
+check("null marker input has no focuses", target_marker_focuses(None), ())
+
+
+class ScopedGH(FakeGH):
+    def __init__(self):
+        super().__init__(
+            [
+                page(
+                    [
+                        {"number": 21, "author": {"login": "other"}},
+                        {"number": 22, "author": {"login": "allowed"}},
+                    ],
+                    more=True,
+                    cursor="S1",
+                ),
+                page([{"number": 23, "author": {"login": "ALLOWED"}}]),
+            ]
+        )
+        self.hydrated = []
+
+    def pr_view_required(self, number, fields):
+        self.hydrated.append(number)
+        return {"number": number, "body": None, "state": "OPEN", "author": {"login": "allowed"}}
+
+
+gh = ScopedGH()
+scoped = scoped_review_pr_json(gh, [], [], ["allowed"])
+check("author-only scope hydrates only matching authors across pages", gh.hydrated, [22, 23])
+check("author-only scope reads both index pages", len(gh.calls), 2)
+check("author-only scope follows the cursor", "cursor=S1" in gh.calls[1], True)
+check("author-only queries still omit bodies", all("body" not in call[-1] for call in gh.calls), True)
+check("hydrated null bodies parse", [tc.PRInfo.from_json(item).target_focuses for item in scoped], [(), ()])
 
 # A partial label connection is unsafe: a roadmap/hold/review label beyond the first 50 can change the
 # work classification, so both full and index surveys fail closed instead of returning a partial PR.
