@@ -48,13 +48,26 @@ def run(argv: list[str], *, idle_seconds: float, max_seconds: float) -> int:
     owned = {}
     child = None
     handlers = {}
+    sampling_unavailable = False
+    status_unavailable = False
 
     def interrupted(signum, frame):
         raise Interrupted(signum)
 
     def sample():
-        nonlocal owned
-        current = processes()
+        nonlocal owned, sampling_unavailable
+        try:
+            current = processes()
+        except (OSError, subprocess.SubprocessError):
+            if not owned:
+                raise  # Initial ownership must still be established before continuing.
+            if not sampling_unavailable:
+                print(
+                    "validation process sampling unavailable; retaining output deadlines", file=sys.stderr, flush=True
+                )
+            sampling_unavailable = True
+            return
+        sampling_unavailable = False
         if child.poll() is None and str(child.pid) not in current:
             raise ValueError("live validation missing from process snapshot")
         for pid, identity in current.items():
@@ -69,7 +82,18 @@ def run(argv: list[str], *, idle_seconds: float, max_seconds: float) -> int:
                 work["agents"] = {pid: identity for pid, identity in work["agents"].items() if alive(identity, current)}
                 work["agents"].update(owned)
 
-            update_work(path, token, register)
+            publish_work(register)
+
+    def publish_work(mutate):
+        nonlocal status_unavailable
+        try:
+            update_work(path, token, mutate)
+        except OSError:
+            if not status_unavailable:
+                print("validation status write unavailable; retaining local deadlines", file=sys.stderr, flush=True)
+            status_unavailable = True
+        else:
+            status_unavailable = False
 
     def observe(line):
         nonlocal last_output
@@ -83,7 +107,7 @@ def run(argv: list[str], *, idle_seconds: float, max_seconds: float) -> int:
         seen.add(digest)
         last_output = time.monotonic()
         if path:
-            update_work(path, token, lambda w: w.update(progress=max(w["progress"], last_output)))
+            publish_work(lambda w: w.update(progress=max(w["progress"], last_output)))
 
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
