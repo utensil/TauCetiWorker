@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Model-free deadline, native-lock and escaped-child regressions."""
 
+import errno
 import fcntl
 import json
 import os
@@ -18,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tauceti_worker import round_activity as a
 from tauceti_worker.round import RoundContext, run_round_subprocess
-from tauceti_worker.runtime_status import atomic_json, read_json
+from tauceti_worker.runtime_status import atomic_json, read_json, update_status
 
 CHILD = """
 import json,os,signal,subprocess,sys,time
@@ -129,6 +130,30 @@ class ActivityTests(unittest.TestCase):
                 )
             )
 
+    def test_unreadable_status_never_erases_ownership(self):
+        before = self.path.read_bytes()
+        with patch.object(Path, "read_text", side_effect=OSError(errno.ENFILE, "host pressure")):
+            with self.assertRaises(OSError):
+                update_status(self.path, heartbeat_at=123)
+            with self.assertRaises(OSError):
+                a.update_work(self.path, "test", lambda w: w.update(progress=123))
+            with self.assertRaises(OSError):
+                a.refuse_surviving_work(self.cfg)
+        self.assertEqual(self.path.read_bytes(), before)
+        update_status(self.path, heartbeat_at=456)
+        self.assertEqual(read_json(self.path)["round_work"]["token"], "test")
+
+    def test_activity_io_failure_does_not_renew_or_abort(self):
+        observer = a.Activity(os.getpid())
+        before = read_json(self.path)["round_work"]["progress"]
+        event = {"type": "item.completed", "item": {"type": "file_change", "status": "completed", "changes": ["one"]}}
+        with patch.object(a, "update_work", side_effect=OSError(errno.ENFILE, "host pressure")):
+            observer.observe(json.dumps(event))
+        self.assertEqual(read_json(self.path)["round_work"]["progress"], before)
+        event["item"]["changes"] = ["two"]
+        observer.observe(json.dumps(event))
+        self.assertGreater(read_json(self.path)["round_work"]["progress"], before)
+
     def run_round(self, mode, timeout=1):
         # Allow subprocess imports/scheduling before testing inactivity; active fixtures run >1s.
         with (
@@ -142,6 +167,35 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(self.run_round("progress"), 0)
         self.assertGreater(time.monotonic() - started, 1)
         self.assertFalse(read_json(self.path)["round_work"]["owned"])
+
+    def test_sampling_pressure_preserves_work_without_extending_idle_deadline(self):
+        original = a.processes
+        for mode, expected, last_failure in (("progress", 0, 6), ("quiet", 124, 30)):
+            with self.subTest(mode=mode):
+                calls = 0
+
+                def flaky(last_failure=last_failure):
+                    nonlocal calls
+                    calls += 1
+                    if 4 <= calls <= last_failure:
+                        raise subprocess.CalledProcessError(-signal.SIGBUS, ["ps"])
+                    return original()
+
+                started = time.monotonic()
+                idle_deadlines = []
+
+                def capture_log(message, started=started, idle_deadlines=idle_deadlines):
+                    if "round idle" in message:
+                        idle_deadlines.append(time.monotonic() - started)
+
+                with patch.object(a, "processes", side_effect=flaky), patch.object(a, "log", side_effect=capture_log):
+                    self.assertEqual(self.run_round(mode), expected)
+                if expected == 124:
+                    self.assertEqual(len(idle_deadlines), 1)
+                    self.assertLess(idle_deadlines[0], 3)
+                else:
+                    self.assertFalse(idle_deadlines)
+                self.assertFalse(read_json(self.path)["round_work"]["owned"])
 
     def test_single_validation_command_extends_native_round(self):
         started = time.monotonic()

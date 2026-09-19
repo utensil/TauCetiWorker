@@ -14,11 +14,17 @@ STATUS_ENV = "TAUCETI_RUNTIME_STATUS"
 _RICH_STYLE_RE = re.compile(r"\[(?:/?(?:bold|red|yellow|green|dim)(?: [^]]+)?|/)\]")
 
 
-def read_json(path: Path) -> dict:
+def read_json(path: Path, *, strict: bool = False) -> dict:
     try:
         value = json.loads(path.read_text())
-    except (OSError, ValueError, TypeError):
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError, TypeError):
+        if strict:
+            raise
+        return {}
+    if strict and not isinstance(value, dict):
+        raise ValueError("runtime status must be an object")
     return value if isinstance(value, dict) else {}
 
 
@@ -46,7 +52,9 @@ def update_status(path: Path, **changes) -> dict:
     lock_path = path.with_suffix(path.suffix + ".lock")
     with lock_path.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        value = read_json(path)
+        # An unreadable existing record is unknown, not an empty record. Otherwise
+        # one failed heartbeat read can erase the active round's ownership token.
+        value = read_json(path, strict=True)
         value.update(changes)
         value["status_updated_at"] = time.time()
         atomic_json(path, value)
