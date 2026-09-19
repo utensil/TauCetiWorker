@@ -69,7 +69,7 @@ def update_work(path: Path, token: str, change) -> dict:
     """Use the runtime-status lock, rejecting writes from an earlier round."""
     with path.with_suffix(path.suffix + ".lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        status = read_json(path)
+        status = read_json(path, strict=True)
         work = status.get("round_work", {})
         if work.get("token") != token:
             raise RuntimeError("round activity identity changed")
@@ -135,7 +135,12 @@ class Activity:
             return
         self.seen.add(fingerprint)
         now = time.monotonic()
-        update_work(self.path, self.token, lambda w: w.update(progress=now))
+        try:
+            update_work(self.path, self.token, lambda w: w.update(progress=now))
+        except OSError:
+            # This event grants no renewal when storage is unavailable. A real token
+            # replacement still raises RuntimeError and stops the stale observer.
+            pass
 
 
 def descendants(owned: dict, snapshot: dict) -> dict:
@@ -150,7 +155,7 @@ def descendants(owned: dict, snapshot: dict) -> dict:
 def refuse_surviving_work(cfg: Config) -> None:
     """One-shot invocations obey the same previous-round admission check."""
     path = Path(os.environ.get(STATUS_ENV, cfg.state / "runtime.json"))
-    previous = read_json(path).get("round_work", {})
+    previous = read_json(path, strict=True).get("round_work", {})
     identities = [*previous.get("owned", {}).values(), *previous.get("agents", {}).values()]
     if identities:
         snapshot = processes()
@@ -182,6 +187,8 @@ def supervise(argv: list[str], timeout: float) -> int:
         child = spawn_round(argv, env=env, pass_fds=(lock.fileno(),))
         owned = {}
         rc = None
+        last_progress = time.monotonic()
+        observation_unavailable = False
 
         def sample():
             nonlocal owned
@@ -195,7 +202,7 @@ def supervise(argv: list[str], timeout: float) -> int:
             for pid, identity in current.items():
                 if identity["group"] == child.pid:
                     owned.setdefault(pid, identity)
-            work = read_json(status_path).get("round_work", {})
+            work = read_json(status_path, strict=True).get("round_work", {})
             if work.get("token") != token:
                 raise RuntimeError("round supervision identity changed")
             for pid, identity in work.get("agents", {}).items():
@@ -207,12 +214,22 @@ def supervise(argv: list[str], timeout: float) -> int:
 
         try:
             while child.poll() is None:
-                work = sample()
+                try:
+                    work = sample()
+                except (OSError, subprocess.SubprocessError):
+                    if not owned:
+                        raise  # Initial process ownership remains mandatory.
+                    if not observation_unavailable:
+                        log("round observation unavailable; retaining last verified progress deadline")
+                    observation_unavailable = True
+                else:
+                    last_progress = work["progress"]
+                    observation_unavailable = False
                 # A snapshot/status write can outlast a child's final output. Prefer
                 # its real exit status to an inactivity timeout.
                 if child.poll() is not None:
                     break
-                if time.monotonic() - work["progress"] >= timeout:
+                if time.monotonic() - last_progress >= timeout:
                     log(f"round idle for {timeout:g}s — stopping owned work")
                     rc = 124
                     break

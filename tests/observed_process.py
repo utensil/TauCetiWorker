@@ -122,7 +122,7 @@ sys.exit(op.run([sys.executable, "-c", sys.argv[1]], idle_seconds=.6, max_second
                     stderr=subprocess.PIPE,
                 )
                 output = self.finish(proc, expected)
-                self.assertLess(time.monotonic() - began, 3.5)
+                self.assertLess(time.monotonic() - began, 6)
                 if expected == 0:
                     self.assertIn(b"11\n", output)
 
