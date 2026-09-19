@@ -1,0 +1,116 @@
+"""Durable repair intent and checkout preservation across process termination.
+
+The round owner calls recovery only after proving its descendants have exited.
+Checkout preparation repeats it under the same lock, covering supervisor death.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import time
+
+from .config import log
+from .runtime_status import atomic_json
+
+
+def _git(cfg, *args):
+    return subprocess.run(
+        ["git", "-C", str(cfg.checkout), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    ).stdout.strip()
+
+
+def _save(cfg, prefix):
+    head = _git(cfg, "rev-parse", "HEAD")
+    dirty = bool(_git(cfg, "status", "--porcelain", "--untracked-files=all"))
+    _git(cfg, "update-ref", prefix, head)
+    stash_ref = None
+    if dirty:
+        _git(cfg, "stash", "push", "--include-untracked", "--quiet", "-m", "tauceti recovery")
+        stash = _git(cfg, "rev-parse", "refs/stash")
+        stash_ref = prefix + "-stash"
+        _git(cfg, "update-ref", stash_ref, stash)
+        if _git(cfg, "status", "--porcelain", "--untracked-files=all"):
+            raise ValueError("checkout still dirty after preservation")
+    return head, stash_ref
+
+
+def checkpoint_repair(cfg, pr, public_head, label):
+    """Keep the existing exact-public-head resume format, including index state."""
+    if not isinstance(pr, int) or pr <= 0 or not re.fullmatch(r"[0-9a-f]{40}", public_head):
+        raise ValueError("invalid repair recovery identity")
+    if _git(cfg, "rev-parse", "HEAD") == public_head and not _git(
+        cfg, "status", "--porcelain", "--untracked-files=all"
+    ):
+        return
+    commit_ref = f"refs/tauceti-resume/{pr}/{public_head}"
+    head, saved_stash = _save(cfg, commit_ref)
+    stash_ref = f"refs/tauceti-resume-stash/{pr}/{public_head}" if saved_stash else None
+    if saved_stash:
+        _git(cfg, "update-ref", stash_ref, _git(cfg, "rev-parse", saved_stash))
+        _git(cfg, "update-ref", "-d", saved_stash)
+    directory = cfg.state / "resume"
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic_json(
+        directory / f"{pr}-{public_head[:12]}.json",
+        {
+            "pr": pr,
+            "public_head": public_head,
+            "candidate_head": head,
+            "commit_ref": commit_ref,
+            "stash_ref": stash_ref,
+            "stage": label,
+            "created_at": int(time.time()),
+        },
+    )
+    log(f"  {label} #{pr}: checkpointed local candidate @{head[:12]} for failed-round resume")
+
+
+def arm_repair(cfg, pr, public_head, label):
+    cfg.state.mkdir(parents=True, exist_ok=True)
+    atomic_json(
+        cfg.state / "active-repair.json",
+        {
+            "pr": pr,
+            "public_head": public_head,
+            "label": label,
+        },
+    )
+
+
+def disarm_repair(cfg):
+    (cfg.state / "active-repair.json").unlink(missing_ok=True)
+
+
+def recover_interrupted_repair(cfg):
+    path = cfg.state / "active-repair.json"
+    if not path.exists():
+        return
+    data = json.loads(path.read_text())
+    checkpoint_repair(cfg, data["pr"], data["public_head"], data["label"])
+    disarm_repair(cfg)
+
+
+def preserve_before_checkout(cfg):
+    """Never let a forced checkout erase an uncheckpointed interrupted candidate."""
+    recover_interrupted_repair(cfg)
+    if not _git(cfg, "status", "--porcelain", "--untracked-files=all"):
+        return
+    prefix = f"refs/tauceti-checkout-recovery/{time.time_ns()}"
+    head, stash_ref = _save(cfg, prefix)
+    directory = cfg.state / "checkout-recovery"
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic_json(
+        directory / (prefix.rsplit("/", 1)[1] + ".json"),
+        {
+            "head": head,
+            "commit_ref": prefix,
+            "stash_ref": stash_ref,
+        },
+    )
+    log(f"checkout: preserved interrupted work in {prefix}; metadata at {directory}")

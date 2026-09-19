@@ -298,6 +298,25 @@ class Claims:
             os.environ.pop("TAUCETI_CLAIM_REPO", None)
 
 
+def renew_heartbeat(key: str) -> int:
+    """Retry one transport failure only after independently verifying ownership."""
+
+    def call(action):
+        try:
+            return subprocess.run([CLAIM_SH, action, key], capture_output=True, timeout=CLAIM_CALL_TIMEOUT_S).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return 2
+
+    rc = call("renew")
+    if rc == 2:
+        held = call("holds")
+        if held == 0:
+            log(f"claim heartbeat for {key}: renewal failed, live ownership verified; retrying once")
+            return call("renew")
+        return 1 if held == 1 else 2
+    return rc
+
+
 def cmd_heartbeat(args) -> int:
     """Internal: renew a claim lease every CLAIM_HEARTBEAT_S until the parent dies (pipe EOF) or the
     lease is lost. Never runs the round's cleanup (default signal disposition, no RoundContext)."""
@@ -317,10 +336,7 @@ def cmd_heartbeat(args) -> int:
                     return 0
         else:
             time.sleep(CLAIM_HEARTBEAT_S)
-        try:
-            rc = subprocess.run([CLAIM_SH, "renew", key], capture_output=True, timeout=CLAIM_CALL_TIMEOUT_S).returncode
-        except (OSError, subprocess.TimeoutExpired):
-            rc = 2
+        rc = renew_heartbeat(key)
         if rc != 0:
             action = "stopping native round" if parent_pid is not None else "stopping heartbeat"
             log(f"claim heartbeat for {key}: ownership could not be verified (rc={rc}); {action}")
