@@ -105,8 +105,10 @@ PR_AUTHOR_SCOPE_INDEX_FIELDS = ("number", "author")
 PR_SCOPE_UNION_INDEX_FIELDS = ("number", "body", "labels", "author")
 
 
-def target_marker_focuses(body: str) -> tuple[str, ...]:
+def target_marker_focuses(body: str | None) -> tuple[str, ...]:
     """Concrete roadmap focuses in target markers; all/auto are scopes, not roadmap area names."""
+    if body is None:
+        return ()
     focuses: set[str] = set()
     for match in TARGET_MARKER_RE.finditer(body):
         try:

@@ -467,6 +467,7 @@ def _pr_json_from_graphql(node: dict) -> dict:
         **{
             k: node.get(k)
             for k in ("number", "title", "body", "isDraft", "mergeable", "updatedAt", "headRefOid", "headRefName")
+            if k in node
         },
         "headRepositoryOwner": node.get("headRepositoryOwner") or {},
         "headRepository": node.get("headRepository") or {},
