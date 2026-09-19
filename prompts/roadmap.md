@@ -43,9 +43,10 @@ Once you have settled on a target, derive a short stable id for it and claim it 
 - **Target id:** `<slug>` = the target's most identifying phrase (its declaration name if it has one, else the key noun phrase of its statement/docstring), lowercased with every run of non-alphanumeric characters replaced by a single `-`. Keep it short and deterministic — another agent picking the *same* target should produce the *same* slug. Example: "the Galois group of a multiquadratic field is (ℤ/2)ⁿ" → `galois-group-multiquadratic-z2n`.
 - **Claim it:**
   ```
-  "__BIN__/claim.sh" acquire "author/<target-roadmap>/<slug>"
+  export TAUCETI_AUTHOR_CLAIM_KEY="author/<target-roadmap>/<slug>"
+  "__BIN__/claim.sh" acquire "$TAUCETI_AUTHOR_CLAIM_KEY"
   ```
-  Exit `0` = it's yours, proceed. Exit `1` = another agent already holds it — pick a DIFFERENT target and claim that instead. Exit `2` = the claim could not be registered; proceed anyway. (This cooperative claim writes to the canonical repo, so without write access there it simply no-ops at exit 2 — that is expected and fine; your real duplicate-avoidance is the open-PR scan above + the intentions claims, and the duplicate sweeper is the backstop.)
+  Exit `0` = it's yours, proceed. Exit `1` = another agent already holds it — pick a DIFFERENT target and claim that instead. Exit `2` = the claim could not be registered; stop and report the provider error. Publication checks that the body names this exact claim and that you still hold it. If separate shell calls do not retain exports, pass `TAUCETI_AUTHOR_CLAIM_KEY` explicitly to the publication wrapper.
 - **Record it in the PR body** (required — the PR will be rejected without it): include the exact line
   ```
   <!--tauceti-target:v1 {"focus":"<target-roadmap>","id":"<slug>"}-->
