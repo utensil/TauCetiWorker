@@ -475,6 +475,7 @@ def continuation_checkout(
     *,
     saved_head: str = "",
     saved_payload: bool = False,
+    checkpoint_verified: bool = False,
     unfinished_only: bool = False,
 ) -> bool | None:
     """Return True to reuse the exact target, False to prepare safely, or None to preserve ambiguity."""
@@ -511,7 +512,11 @@ def continuation_checkout(
             return False
         based = git("merge-base", "--is-ancestor", public_head, target_head)
         saved = git("merge-base", "--is-ancestor", saved_head, target_head) if saved_head else None
-        if based.returncode or (saved is not None and saved.returncode not in (0, 1)):
+        if based.returncode not in (0, 1) or (saved is not None and saved.returncode not in (0, 1)):
+            return None
+        # A verified exact-public-head checkpoint also covers rebased repairs.
+        # Without it, retain the ordinary public-ancestry guard.
+        if based.returncode and not (checkpoint_verified and saved is not None and saved.returncode == 0):
             return None
         if saved_payload or (saved is not None and saved.returncode == 1):
             return None if dirty else False
