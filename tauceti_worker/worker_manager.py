@@ -10,6 +10,7 @@ import argparse
 import base64
 import contextlib
 import dataclasses
+import errno
 import fcntl
 import json
 import os
@@ -701,6 +702,10 @@ def _serve_one(server: socket.socket, handler) -> None:
         conn, _ = server.accept()
     except BlockingIOError:
         return
+    except OSError as exc:
+        if exc.errno in (errno.ENFILE, errno.EMFILE):
+            return
+        raise
     with conn:
         conn.settimeout(0.5)
         try:
@@ -779,6 +784,26 @@ def cmd_managed_runner(args) -> int:
                 exit_code=None,
                 stopped_at=None,
             )
+            status_unavailable = False
+
+            def publish_status(**changes) -> None:
+                # Once admitted, status telemetry must not terminate useful child work.
+                # Keep the last successful timestamp stale until storage recovers.
+                nonlocal status_unavailable
+                try:
+                    update_status(state, **changes)
+                except OSError as exc:
+                    if not status_unavailable:
+                        print(
+                            f"tauceti workers: {spec.id} status write unavailable (errno {exc.errno}); continuing child",
+                            file=sys.stderr,
+                        )
+                    status_unavailable = True
+                else:
+                    if status_unavailable:
+                        print(f"tauceti workers: {spec.id} status writes recovered", file=sys.stderr)
+                    status_unavailable = False
+
             test_command = os.environ.get("TAUCETI_MANAGER_TEST_COMMAND")
             child_argv = shlex.split(test_command) if test_command else spec.work_argv()
             parent_pipe_read, parent_pipe_write = os.pipe()
@@ -797,7 +822,7 @@ def cmd_managed_runner(args) -> int:
             )
             os.close(parent_pipe_read)
             parent_pipe_read = None
-            update_status(state, child_pid=child.pid, process_group=child.pid)
+            publish_status(child_pid=child.pid, process_group=child.pid)
 
             def request(req: dict) -> dict:
                 nonlocal stopping
@@ -815,10 +840,10 @@ def cmd_managed_runner(args) -> int:
                 if ready:
                     _serve_one(server, request)
                 if time.monotonic() - last_heartbeat >= 2:
-                    update_status(state, alive=True, heartbeat_at=time.time(), child_pid=child.pid)
+                    publish_status(alive=True, heartbeat_at=time.time(), child_pid=child.pid, process_group=child.pid)
                     last_heartbeat = time.monotonic()
             if stopping and child.poll() is None:
-                update_status(state, state="stopping", activity_at=time.time())
+                publish_status(state="stopping", activity_at=time.time())
                 signal_group(child.pid, signal.SIGTERM)
                 deadline = time.monotonic() + 20
                 while child.poll() is None and time.monotonic() < deadline:
@@ -830,8 +855,7 @@ def cmd_managed_runner(args) -> int:
                     child.wait()
             rc = child.wait()
             final = "stopped" if stopping else ("exited" if rc == 0 else "failed")
-            update_status(
-                state,
+            publish_status(
                 state=final,
                 alive=False,
                 heartbeat_at=time.time(),
@@ -846,7 +870,9 @@ def cmd_managed_runner(args) -> int:
             server.close()
             try:
                 sock_path.unlink()
-            except FileNotFoundError:
+            except OSError:
+                # Cleanup of the socket must not skip signaling the child or closing its
+                # parent-liveness pipe when the host cannot perform filesystem operations.
                 pass
             if child is not None and child.poll() is None:
                 signal_group(child.pid, signal.SIGTERM)
