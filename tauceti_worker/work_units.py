@@ -1134,7 +1134,7 @@ def _resume_paths(w: Worker, c: Candidate) -> tuple[Path, str, str]:
 
 
 def _resume_metadata(w: Worker, c: Candidate) -> dict | bool | None:
-    meta_path, _, _ = _resume_paths(w, c)
+    meta_path, commit_ref, stash_ref = _resume_paths(w, c)
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1143,7 +1143,26 @@ def _resume_metadata(w: Worker, c: Candidate) -> dict | bool | None:
         return None
     if not isinstance(meta, dict):
         return None
-    return meta if (meta.get("pr"), meta.get("public_head")) == (c.pr, c.head) else None
+    if (meta.get("pr"), meta.get("public_head")) != (c.pr, c.head):
+        return None
+    candidate_head = meta.get("candidate_head")
+    if (
+        meta.get("commit_ref") != commit_ref
+        or meta.get("stash_ref") not in (None, stash_ref)
+        or not isinstance(candidate_head, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", candidate_head)
+    ):
+        return None
+    try:
+        verified = subprocess.run(
+            ["git", "-C", str(w.cfg.checkout), "rev-parse", "--verify", commit_ref + "^{commit}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return meta if verified.returncode == 0 and verified.stdout.strip() == candidate_head else None
 
 
 def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> bool:
@@ -1163,18 +1182,13 @@ def _restore_resume(w: Worker, c: Candidate, p) -> bool | None:
     try:
         if not meta_path.is_file():
             return False
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("public_head") != c.head or meta.get("pr") != c.pr:
+        meta = _resume_metadata(w, c)
+        if not isinstance(meta, dict):
             return None
         candidate_ref = str(meta.get("commit_ref") or commit_ref)
         candidate_head = str(meta.get("candidate_head") or "")
-        verify = subprocess.run(
-            ["git", "-C", str(w.cfg.checkout), "merge-base", "--is-ancestor", c.head, candidate_ref],
-            timeout=30,
-        )
-        if not candidate_head or verify.returncode != 0:
-            log(f"  resume #{c.pr}: checkpoint is not based on current public head; leaving it preserved")
-            return None
+        # A repair can legitimately rebase. The private checkpoint binds its exact
+        # object to the admitted public CAS; ancestry is not a publication proof.
         branch = p.head_ref
         if subprocess.run(
             ["git", "-C", str(w.cfg.checkout), "checkout", "-q", "-B", branch, candidate_ref], timeout=60
@@ -1341,6 +1355,7 @@ def _do_fixlike(
                 head,
                 saved_head=str(saved.get("candidate_head") or ""),
                 saved_payload=bool(saved.get("stash_ref")),
+                checkpoint_verified=True,
             )
         )
         if reuse is None:
