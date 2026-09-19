@@ -37,7 +37,7 @@ else:
         p.write_text(f"#!{sys.executable}\n" + source + "\n")
         p.chmod(0o755)
 
-    def publish(slug, wrong=False, bad_head=False, mismatched_key=False):
+    def publish(slug, wrong=False, bad_head=False, mismatched_key=False, body_mode="file"):
         directory = root / slug
         directory.mkdir()
         body = (
@@ -66,8 +66,16 @@ else:
             "TAUCETI_RESPECT_CLAIMS": "true",
         }
         env.pop("TAUCETI_TARGET_MARKER", None)
+        body_args = {
+            "file": ["--body-file", str(original)],
+            "file-equals": ["--body-file=" + str(original)],
+            "inline": ["--body", body],
+            "inline-equals": ["--body=" + body],
+            "stdin": ["-F", "-"],
+        }[body_mode]
         proc = subprocess.run(
-            [str(ROOT / "scripts/gh-safe-pr-create"), "--body-file", str(original), "--head", slug],
+            [str(ROOT / "scripts/gh-safe-pr-create"), "--title", "test publication", *body_args, "--head", slug],
+            input=body if body_mode == "stdin" else None,
             env=env,
             capture_output=True,
             text=True,
@@ -89,6 +97,8 @@ else:
     publish("foreign", wrong=True)
     publish("wrong-body", mismatched_key=True)
     publish("mismatch", bad_head=True)
+    for mode in ("file-equals", "inline", "inline-equals", "stdin"):
+        publish(mode, body_mode=mode)
     launches = []
     with patch.object(agents, "run_agent_proc", side_effect=lambda argv, **kw: launches.append((argv, kw)) or 0):
         for _ in range(2):
