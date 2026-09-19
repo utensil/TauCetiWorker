@@ -1146,76 +1146,15 @@ def _resume_metadata(w: Worker, c: Candidate) -> dict | bool | None:
     return meta if (meta.get("pr"), meta.get("public_head")) == (c.pr, c.head) else None
 
 
-def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> None:
-    """Preserve a changed checkout after a failed host round so the next round can resume it.
+def _checkpoint_resume(w: Worker, c: Candidate, label: str) -> bool:
+    from .checkout_recovery import checkpoint_repair
 
-    A failed round is not a reason to throw away a local candidate. The checkpoint
-    is private, keyed by the exact public head, and only restored when that head is still current. A
-    dirty tree is stashed (including untracked source files) behind a durable private ref; a committed
-    candidate is retained by its exact commit ref. Failure to checkpoint never masks the original
-    provider diagnostic.
-    """
-    co = w.cfg.checkout
     try:
-        head = _checkout_head(w.cfg)
-        if not head:
-            return
-        status = subprocess.run(
-            ["git", "-C", str(co), "status", "--porcelain"], capture_output=True, text=True, timeout=30
-        )
-        dirty = bool((status.stdout or "").strip())
-        if head == c.head and not dirty:
-            return
-        meta_path, commit_ref, stash_ref = _resume_paths(w, c)
-        subprocess.run(["git", "-C", str(co), "update-ref", commit_ref, head], check=True, timeout=30)
-        stash = None
-        if dirty:
-            made = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(co),
-                    "stash",
-                    "push",
-                    "--include-untracked",
-                    "--quiet",
-                    "-m",
-                    f"tauceti-resume {c.pr}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if made.returncode == 0:
-                raw = subprocess.run(
-                    ["git", "-C", str(co), "rev-parse", "refs/stash"], capture_output=True, text=True, timeout=30
-                )
-                if raw.returncode == 0 and raw.stdout.strip():
-                    stash = raw.stdout.strip()
-                    subprocess.run(["git", "-C", str(co), "update-ref", stash_ref, stash], check=True, timeout=30)
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = meta_path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "pr": c.pr,
-                    "public_head": c.head,
-                    "candidate_head": head,
-                    "commit_ref": commit_ref,
-                    "stash_ref": stash_ref if stash else None,
-                    "stage": label,
-                    "created_at": int(time.time()),
-                },
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, meta_path)
-        log(f"  {label} #{c.pr}: checkpointed local candidate @{head[:12]} for failed-round resume")
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        checkpoint_repair(w.cfg, c.pr, c.head, label)
+        return True
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         log(f"  {label} #{c.pr}: could not checkpoint local candidate ({exc})")
+        return False
 
 
 def _restore_resume(w: Worker, c: Candidate, p) -> bool | None:
@@ -1381,6 +1320,11 @@ def _do_fixlike(
             w, f"{TAUCETI}/pull/{pr}", prompt, opts, allow_push=f"{p.head_owner}/{p.head_repo}"
         )  # bubble checks out the PR inside
     else:
+        from .checkout_recovery import arm_repair, disarm_repair, recover_interrupted_repair
+
+        # The old child may have died before its normal failure path. This runs
+        # under round.lock, after the supervisor has proved previous work dead.
+        recover_interrupted_repair(w.cfg)
         meta = _resume_metadata(w, c)
         saved = meta if isinstance(meta, dict) else {}
         # With no checkpoint, take the fresh-checkout path. The fork head may not exist in the
@@ -1432,15 +1376,18 @@ def _do_fixlike(
         # exact public head that admitted this round, not against the private checkpoint commit.
         os.environ["TAUCETI_PUSH_EXPECT"] = head if reuse or resumed else checked
         log(f"  {label} #{pr}: checked out @ {checked[:12]}")
+        arm_repair(w.cfg, c.pr, c.head, label)
         rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
     if rc == 0:
+        if not bubble:
+            disarm_repair(w.cfg)
         w.rs.bust(pr)
     else:
         reason = take_last_agent_infra_failure()
         # Preserve failed host work before another target can use this shared checkout. Lint and
         # publication failures need recovery too; only provider failures qualify for a refund.
-        if not bubble:
-            _checkpoint_resume(w, c, label)
+        if not bubble and _checkpoint_resume(w, c, label):
+            disarm_repair(w.cfg)
         _refund_infra_failure(w, c, label, charged, reason=reason)  # raises NoProgress when provider fault
     return rc
 

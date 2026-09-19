@@ -596,6 +596,14 @@ def prepare_checkout(cfg: Config) -> bool:
         if subprocess.run(["git", "clone", "-q", f"https://github.com/{TAUCETI}", str(co)]).returncode:
             return False
 
+    from .checkout_recovery import preserve_before_checkout
+
+    try:
+        preserve_before_checkout(cfg)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        log(f"checkout: preservation failed; refusing checkout reuse ({exc})")
+        return False
+
     def g(*a) -> int:
         return subprocess.run(["git", "-C", str(co), *a]).returncode
 

@@ -113,6 +113,13 @@ PR. Otherwise carry the same exact target, delivered declarations, and endpoint 
 immediate consumer into the existing PR-body explanation; do not invent a new
 justification at submission time.
 
+Fetching current `main` for that overlap check does not require rebasing a validated
+candidate onto every new upstream commit. Keep its exact tested head and merge base
+when upstream changes are unrelated and the branch remains compatible. Rebase and
+revalidate when a conflict, changed dependency/toolchain, or review finding requires
+it. Do not restart full validation merely because `main` advanced during the checks;
+record the inspected upstream head and let CI test the submitted integration.
+
 Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
 You author from **your own fork** of TauCetiProject/TauCeti (`__FORK__/TauCeti`): the branch is pushed there, and the PR is opened from your fork to `TauCetiProject/TauCeti:main`. You do not need write access to the canonical repo. (The wrappers are already configured to push to your fork — just run them.)

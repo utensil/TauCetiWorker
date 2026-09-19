@@ -244,6 +244,11 @@ def supervise(argv: list[str], timeout: float) -> int:
                         warned = True
                 time.sleep(0.05)
             child.wait()
+            # The round child can be terminated before run_agent_host returns.
+            # Only the supervisor can safely snapshot after all writers exit.
+            from .checkout_recovery import recover_interrupted_repair
+
+            recover_interrupted_repair(cfg)
         return rc
 
 
