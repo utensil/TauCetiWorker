@@ -89,6 +89,43 @@ class ObservedProcessTests(unittest.TestCase):
         output = self.finish(self.start("import sys;sys.stdout.write('failure detail');sys.exit(7)"), 7)
         self.assertEqual(output, b"failure detail")
 
+    def test_transient_sampling_and_status_errors_preserve_work_and_deadlines(self):
+        for code, expected in (
+            ("import time; [(print(i,flush=True),time.sleep(.15)) for i in range(12)]", 0),
+            ("import time;time.sleep(10)", 124),
+        ):
+            with self.subTest(expected=expected):
+                harness = """import errno, signal, subprocess, sys
+from tauceti_worker import observed_process as op
+original_sample, original_update = op.processes, op.update_work
+sample_calls = update_calls = 0
+def flaky_sample():
+    global sample_calls
+    sample_calls += 1
+    if sample_calls in (2, 3):
+        raise subprocess.CalledProcessError(-signal.SIGBUS, ["ps"])
+    return original_sample()
+def flaky_update(*args, **kwargs):
+    global update_calls
+    update_calls += 1
+    if update_calls in (3, 4):
+        raise OSError(errno.ENFILE, "injected host pressure")
+    return original_update(*args, **kwargs)
+op.processes, op.update_work = flaky_sample, flaky_update
+sys.exit(op.run([sys.executable, "-c", sys.argv[1]], idle_seconds=.6, max_seconds=4))
+"""
+                began = time.monotonic()
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", harness, code],
+                    env=self.env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                output = self.finish(proc, expected)
+                self.assertLess(time.monotonic() - began, 3.5)
+                if expected == 0:
+                    self.assertIn(b"11\n", output)
+
     def test_stale_token_refuses_to_launch(self):
         self.env[TOKEN_ENV] = "old"
         marker = Path(self.tmp.name) / "launched"
