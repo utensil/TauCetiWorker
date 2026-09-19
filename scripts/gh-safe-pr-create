@@ -10,12 +10,12 @@
 #   TAUCETI_AUTHOR_CLAIM_KEY   the author/<area>/<target-id> claim acquired in shell before the agent ran
 #   TAUCETI_TARGET_MARKER      the exact <!--tauceti-target:v1 {...}--> string the PR body must contain
 #   TAUCETI_CLAIM_SH           path to claim.sh (default: alongside this script)
-# All `gh pr create` flags pass through unchanged.
+# Non-body flags pass through unchanged; explicit body input is frozen before publication.
 set -uo pipefail
 
 CLAIM_KEY="${TAUCETI_AUTHOR_CLAIM_KEY:-}"
 MARKER="${TAUCETI_TARGET_MARKER:-}"
-REQUIRE_MARKER="${TAUCETI_REQUIRE_TARGET_MARKER:-}"   # 1 ⇒ body must carry SOME <!--tauceti-target--> marker
+REQUIRE_MARKER="${TAUCETI_REQUIRE_TARGET_MARKER:-}"   # 1 ⇒ marker must match the explicit author claim
 CLAIM_SH="${TAUCETI_CLAIM_SH:-$(cd "$(dirname "$0")" && pwd)/claim.sh}"
 
 die() { echo "gh-safe-pr-create: $*" >&2; exit 1; }
@@ -33,15 +33,57 @@ pr_body_from_args() {
     printf '%s' "$b"
 }
 
+# Snapshot explicit body input once: validation and gh must read the same bytes, even if another
+# host round overwrites the source file. Preserve the upstream argument/body/receipt flow below.
+publication_dir="$(mktemp -d "${TMPDIR:-/tmp}/tauceti-publication.XXXXXX")" || die "cannot allocate publication scratch"
+trap 'rm -rf "$publication_dir"' EXIT
+frozen_body="$publication_dir/body.md"
+args=(); body_count=0
+while (( $# )); do
+    flag="$1"; shift
+    case "$flag" in
+        --body|-b|--body-file|-F)
+            (( $# )) || die "missing value for $flag"
+            value="$1"; shift;;
+        --body=*|--body-file=*) value="${flag#*=}"; flag="${flag%%=*}";;
+        --fill*|--template|-T|--template=*|--editor|-e|--web|-w|--recover|--recover=*)
+            die "$flag can replace the verified body; provide an explicit --body-file";;
+        *) args+=("$flag"); continue;;
+    esac
+    (( body_count += 1 ))
+    (( body_count == 1 )) || die "provide exactly one body input"
+    case "$flag" in
+        --body|-b) printf '%s' "$value" >"$frozen_body" || die "cannot freeze body";;
+        *) if [[ "$value" == "-" ]]; then cat >"$frozen_body"; else cat -- "$value" >"$frozen_body"; fi \
+               || die "cannot read body file";;
+    esac
+    args+=(--body-file "$frozen_body")
+done
+set -- "${args[@]}"
+if (( body_count )); then chmod 400 "$frozen_body" || die "cannot protect frozen body"; fi
+
+# Bind agent-picked targets too: some valid marker is insufficient when fronts share scratch paths.
+if [[ "$REQUIRE_MARKER" == "1" || -n "$MARKER" || -n "$CLAIM_KEY" ]]; then
+    (( body_count == 1 )) || die "target validation requires an explicit body"
+    body_claim="$(jq -ner --rawfile body "$frozen_body" '
+      [$body | match("<!--tauceti-target:v1 (\\{[^}]*\\})-->"; "g") | .captures[0].string | fromjson]
+      | select(length == 1) | .[0]
+      | select((.focus | type) == "string" and (.id | type) == "string")
+      | select((.focus | length) > 0 and (.id | length) > 0)
+      | "author/" + .focus + "/" + .id')" || die "body must contain exactly one valid target marker"
+    [[ "$body_claim" == "$CLAIM_KEY" ]] || die "body target does not match TAUCETI_AUTHOR_CLAIM_KEY"
+fi
+
 # 1) Author claim must still be ours (else another agent is authoring this target — abandon).
-if [[ -n "$CLAIM_KEY" && -x "$CLAIM_SH" ]]; then
+if [[ -n "$CLAIM_KEY" ]]; then
+    [[ -x "$CLAIM_SH" ]] || die "claim checker unavailable"
     "$CLAIM_SH" holds "$CLAIM_KEY" \
         || die "author lease '$CLAIM_KEY' lost (another agent took the target) — do NOT create the PR"
 fi
 
 # 2) The PR body must carry the target marker so the conservative dup-sweeper can match it.
 #    Either an EXACT marker is mandated (TAUCETI_TARGET_MARKER, when the shell pre-picked the target),
-#    or just SOME well-formed marker is required (TAUCETI_REQUIRE_TARGET_MARKER, agent-picked target).
+#    or a claim-bound marker is required (TAUCETI_REQUIRE_TARGET_MARKER, agent-picked target).
 if [[ -n "$MARKER" ]]; then
     body="$(pr_body_from_args "$@")"
     [[ "$body" == *"$MARKER"* ]] \
@@ -56,12 +98,13 @@ elif [[ "$REQUIRE_MARKER" == "1" ]]; then
 It lets other agents and the dup-sweeper recognize which roadmap target this PR authors."
 fi
 
-echo "gh-safe-pr-create: gh pr create $*" >&2
+expected_head="$(git rev-parse HEAD)" || die "cannot identify candidate HEAD"
+echo "gh-safe-pr-create: publishing frozen body" >&2
 # Keep the normal gh URL output for the agent, while recording only the resulting PR number in the
 # host-provided per-round inbox. The inbox is a receipt consumed by the Worker host; it is not the
 # durable ownership record. A missing/failed receipt is surfaced as an error rather than silently
 # creating an unowned PR that another maintenance Worker could pick up.
-if [[ -n "${TAUCETI_PR_RECEIPT_FILE:-}" ]]; then
+if [[ -n "${TAUCETI_PR_RECEIPT_FILE:-}" ]] || (( body_count )); then
     output="$(gh pr create "$@" 2>&1)"
     rc=$?
     printf '%s\n' "$output"
@@ -69,8 +112,26 @@ if [[ -n "${TAUCETI_PR_RECEIPT_FILE:-}" ]]; then
     url="$(grep -Eo 'https://github\.com/[^[:space:]]+/pull/[1-9][0-9]*' <<<"$output" | tail -1)"
     [[ -n "$url" ]] || die "gh pr create succeeded but returned no PR URL; ownership was not recorded"
     number="${url##*/}"
-    printf '%s\n' "$number" >>"$TAUCETI_PR_RECEIPT_FILE" \
-        || die "gh pr create succeeded but could not write the ownership receipt"
+    if [[ -n "${TAUCETI_PR_RECEIPT_FILE:-}" ]]; then
+        printf '%s\n' "$number" >>"$TAUCETI_PR_RECEIPT_FILE" \
+            || die "gh pr create succeeded but could not write the ownership receipt"
+    fi
+    # Record ownership first: a failed readback must not orphan an already-created PR.
+    if (( body_count )); then
+        gh pr view "$url" --json body,headRefOid >"$publication_dir/result.json" \
+            || die "PR created but readback failed; inspect before retrying"
+        verified=false
+        jq -e --rawfile body "$frozen_body" --arg head "$expected_head" \
+            '.body == $body and .headRefOid == $head' "$publication_dir/result.json" >/dev/null && verified=true
+        if [[ -n "${TAUCETI_PR_RECEIPT_FILE:-}" ]]; then
+            body_blob="$(git hash-object "$frozen_body")" || die "cannot hash published body"
+            jq -nc --arg url "$url" --arg head "$expected_head" --arg claim "$CLAIM_KEY" \
+                --arg body_git_blob "$body_blob" --argjson verified "$verified" \
+                '{url:$url,head:$head,claim:$claim,body_git_blob:$body_git_blob,verified:$verified}' \
+                >>"$TAUCETI_PR_RECEIPT_FILE.jsonl" || die "cannot record publication verification"
+        fi
+        [[ "$verified" == "true" ]] || die "created body/head differs from the candidate; inspect before retrying"
+    fi
     exit 0
 fi
-exec gh pr create "$@"
+gh pr create "$@"
