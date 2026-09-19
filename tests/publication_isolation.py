@@ -39,7 +39,7 @@ else:
 
     def publish(slug, wrong=False, bad_head=False, mismatched_key=False, body_mode="file"):
         directory = root / slug
-        directory.mkdir()
+        directory.mkdir(parents=True)
         body = (
             "This PR adds "
             + slug
@@ -96,6 +96,7 @@ else:
         assert list(pool.map(publish, ["one", "two"])) == [0, 0]
     publish("foreign", wrong=True)
     publish("wrong-body", mismatched_key=True)
+    publish("TauCetiRoadmap/Topology/README.md#volume-density")
     publish("mismatch", bad_head=True)
     for mode in ("file-equals", "inline", "inline-equals", "stdin"):
         publish(mode, body_mode=mode)

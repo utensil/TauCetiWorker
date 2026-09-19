@@ -69,7 +69,7 @@ if [[ "$REQUIRE_MARKER" == "1" || -n "$MARKER" || -n "$CLAIM_KEY" ]]; then
       [$body | match("<!--tauceti-target:v1 (\\{[^}]*\\})-->"; "g") | .captures[0].string | fromjson]
       | select(length == 1) | .[0]
       | select((.focus | type) == "string" and (.id | type) == "string")
-      | select((.focus | test("^[A-Za-z0-9_-]+$")) and (.id | test("^[A-Za-z0-9_-]+$")))
+      | select((.focus | length) > 0 and (.id | length) > 0)
       | "author/" + .focus + "/" + .id')" || die "body must contain exactly one valid target marker"
     [[ "$body_claim" == "$CLAIM_KEY" ]] || die "body target does not match TAUCETI_AUTHOR_CLAIM_KEY"
 fi
