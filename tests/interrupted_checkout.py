@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ from tauceti_worker import agents
 from tauceti_worker import checkout_recovery as cr
 from tauceti_worker import round as rounds
 from tauceti_worker import round_activity as ra
+from tauceti_worker.constants import MAX_INFRA_REFUNDS
+from tauceti_worker.survey import Counters
 
 
 class Recovery(unittest.TestCase):
@@ -52,14 +55,17 @@ class Recovery(unittest.TestCase):
         self.assertEqual((self.cfg.checkout / "tracked").read_text(), "base\nstaged\nunstaged\n")
         self.assertEqual((self.cfg.checkout / "new.lean").read_bytes(), b"-- recover me\n")
 
-    def test_supervisor_timeout_preserves_after_writers_exit(self):
+    def repair_argv(self):
         child = """import os,sys,time
 from pathlib import Path
 from types import SimpleNamespace
 from tauceti_worker.checkout_recovery import arm_repair
+from tauceti_worker.survey import Counters
 co,state,head=sys.argv[1:]
 cfg=SimpleNamespace(checkout=Path(co),state=Path(state))
-arm_repair(cfg,77,head,'fix')
+key=f'fix-77-{head[:12]}'
+Counters(cfg).write(key,3)
+arm_repair(cfg,77,head,'fix',charged={key:3})
 import subprocess
 (cfg.checkout/'tracked').write_text('base\\nstaged\\n')
 subprocess.run(['git','-C',co,'add','tracked'],check=True)
@@ -67,19 +73,115 @@ subprocess.run(['git','-C',co,'add','tracked'],check=True)
 (cfg.checkout/'new.lean').write_bytes(b'-- recover me\\n')
 time.sleep(20)
 """
-        argv = [sys.executable, "-c", child, str(self.cfg.checkout), str(self.cfg.state), self.head]
+        return [sys.executable, "-c", child, str(self.cfg.checkout), str(self.cfg.state), self.head]
+
+    def test_supervisor_timeout_preserves_after_writers_exit(self):
         with (
             patch.object(ra.Config, "resolve", return_value=self.cfg),
-            patch.object(rounds, "self_argv", return_value=argv),
+            patch.object(rounds, "self_argv", return_value=self.repair_argv()),
             patch.object(ra, "POLL_INTERVAL", 0.03),
         ):
             self.assertEqual(ra.supervise([], 0.5), 124)
+        self.assertEqual(Counters(self.cfg).read(f"fix-77-{self.head[:12]}"), 3)
         self.assert_saved()
 
     def test_abrupt_supervisor_death_recovers_before_checkout(self):
         cr.arm_repair(self.cfg, 77, self.head, "fix")
         self.dirty()
         cr.preserve_before_checkout(self.cfg)
+        self.assert_saved()
+
+    def arm_charged(self, count=3):
+        self.counter = Counters(self.cfg)
+        self.key = f"fix-77-{self.head[:12]}"
+        self.counter.write(self.key, count)
+        cr.arm_repair(self.cfg, 77, self.head, "fix", charged={self.key: count})
+        self.dirty()
+
+    def test_operator_stop_refunds_only_after_preserving_candidate(self):
+        self.arm_charged()
+        cr.recover_interrupted_repair(self.cfg, operator_interrupted=True)
+        self.assertEqual(self.counter.read(self.key), 2)
+        self.assertEqual(self.counter.read("infra-fix-77"), 1)
+        self.assert_saved()
+
+    def test_unknown_death_retains_attempt(self):
+        self.arm_charged()
+        cr.recover_interrupted_repair(self.cfg)
+        self.assertEqual(self.counter.read(self.key), 3)
+        self.assert_saved()
+
+    def test_interruption_refunds_are_bounded(self):
+        self.arm_charged()
+        self.counter.write("infra-fix-77", MAX_INFRA_REFUNDS)
+        cr.recover_interrupted_repair(self.cfg, operator_interrupted=True)
+        self.assertEqual(self.counter.read(self.key), 3)
+        self.assert_saved()
+
+    def test_refund_replay_finishes_before_next_survey_without_double_credit(self):
+        # A private commit plus dirty work must retain the original stash on replay.
+        (self.cfg.checkout / "committed").write_text("private candidate\n")
+        self.git("add", "committed")
+        self.git("commit", "-qm", "private candidate")
+        self.arm_charged()
+        write = Counters.write
+
+        def fail_after_decrement(counters, name, value):
+            if name == "infra-fix-77":
+                raise OSError("interrupted counter write")
+            write(counters, name, value)
+
+        with patch.object(Counters, "write", fail_after_decrement):
+            with self.assertRaises(OSError):
+                cr.recover_interrupted_repair(self.cfg, operator_interrupted=True)
+        self.assertEqual(self.counter.read(self.key), 2)
+        # The next native admission replays durable targets before it can survey or charge again.
+        with rounds.RoundContext(self.cfg):
+            self.assertEqual(self.counter.read(self.key), 2)
+            self.assertEqual(self.counter.read("infra-fix-77"), 1)
+            self.counter.incr(self.key)
+        self.assertEqual(self.counter.read(self.key), 3)
+        self.assert_saved()
+
+    def test_crash_before_refund_journal_keeps_private_candidate_stash(self):
+        (self.cfg.checkout / "committed").write_text("private candidate\n")
+        self.git("add", "committed")
+        self.git("commit", "-qm", "private candidate")
+        self.arm_charged()
+        atomic_json = cr.atomic_json
+
+        def fail_refund_journal(path, data):
+            if "interruption_refund" in data:
+                raise OSError("interrupted before refund journal")
+            atomic_json(path, data)
+
+        with patch.object(cr, "atomic_json", fail_refund_journal):
+            with self.assertRaises(OSError):
+                cr.recover_interrupted_repair(self.cfg, operator_interrupted=True)
+        cr.recover_interrupted_repair(self.cfg)
+        self.assertEqual(self.counter.read(self.key), 3)
+        self.assert_saved()
+
+    def test_supervisor_operator_interrupt_reaches_refund_path(self):
+        sleep = time.sleep
+        interrupted = False
+
+        def interrupt_once(delay):
+            nonlocal interrupted
+            if not interrupted and delay == ra.POLL_INTERVAL and (self.cfg.checkout / "new.lean").exists():
+                interrupted = True
+                raise KeyboardInterrupt
+            sleep(delay)
+
+        with (
+            patch.object(ra.Config, "resolve", return_value=self.cfg),
+            patch.object(rounds, "self_argv", return_value=self.repair_argv()),
+            patch.object(ra, "POLL_INTERVAL", 0.03),
+            patch.object(ra.time, "sleep", side_effect=interrupt_once),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                ra.supervise([], 30)
+        self.assertEqual(Counters(self.cfg).read(f"fix-77-{self.head[:12]}"), 2)
         self.assert_saved()
 
     def test_unbound_dirty_checkout_gets_durable_snapshot(self):

@@ -15,6 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -168,5 +169,32 @@ with tempfile.TemporaryDirectory() as state:
     check("cap leaves the attempt charged", w.counters.read(KEYS[0]), 3)
 
 agents._LAST_AGENT_FAILURE = None
+
+# Claims are checked before an agent can run. Contention is cooperative dedup;
+# unverifiable ownership gets the same bounded infrastructure allowance as provider failure.
+with tempfile.TemporaryDirectory() as state:
+    w = fresh(state)
+    claim = Mock(return_value=False)
+    w.claims = SimpleNamespace(begin_branch_work=claim)
+    sv = SimpleNamespace(
+        open_prs=[SimpleNamespace(number=CAND.pr, head_owner="fixture", head_repo="repo", head_ref="topic")]
+    )
+    check("claim contention skips candidate", wu.do_fix(w, sv, CAND, None, False), None)
+    check("claim contention does not spend an attempt", w.counters.read(KEYS[0]), 0)
+    claim.side_effect = NoProgress("claim ownership could not be verified; no authoring launched")
+    for _ in range(wu.MAX_INFRA_REFUNDS):
+        try:
+            wu.do_fix(w, sv, CAND, None, False)
+        except NoProgress:
+            pass
+        else:
+            raise AssertionError("unverified claim did not stop authoring")
+    check("unverified claims refunded within allowance", w.counters.read(KEYS[0]), 0)
+    try:
+        wu.do_fix(w, sv, CAND, None, False)
+    except NoProgress:
+        pass
+    check("persistent claim failure eventually charged", w.counters.read(KEYS[0]), 1)
+
 print("\nFAIL" if fails else "\nall infra-failure budget checks passed")
 sys.exit(1 if fails else 0)

@@ -42,6 +42,16 @@ identify its exact head and source; report it as prior evidence, not a fresh che
 identify any unpublished local changes separately. If you make source changes for publication,
 the full verification and safe-push requirements below apply.
 
+Before direct Lean probes, run a targeted `lake build` for the probe's direct imports at the source
+revision being claimed; Lake handles transitive dependencies and reuses valid cached artifacts.
+Fetch missing Mathlib artifacts with `lake exe cache get` when needed; this does not validate
+TauCeti artifacts. Do not routinely clean caches or force recompilation. Run the probe only after
+the targeted build succeeds, and reuse validated dependencies while their inputs remain unchanged.
+`lake env lean` and `#check`/`#print` load existing `.olean` files without validating their freshness.
+Serialize cache extraction, builds, and probes within the checkout. For a contested replacement,
+test the unchanged published control and the replacement against the same dependencies validated
+by Lake. Keep probes and their output in this round's scratch directory.
+
 ## Rules of the repo (hard constraints)
 - Code goes under `TauCeti/`. Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds every module under `TauCeti/`, so there is no need to touch it (if a reviewer claims your API is not reachable from the root, the glob already covers it). Do NOT touch `Scripts/`, `.github/`, the lakefile (`lakefile.toml`/`lakefile.lean`), or the Lake pins (`lake-manifest.json`/`lean-toolchain`) — the lakefile is human-owned, and forward Mathlib/toolchain bumps are a separate dedicated flow; keep this PR to `TauCeti/`.
 - Use `namespace TauCeti` for project-specific declarations. When extending an existing Mathlib type, place its operations and associated API in that type's existing namespace (for example, root `ContMDiffMap`) so receiver dot notation works. Do not nest that namespace under `TauCeti` or add compatibility aliases solely to keep the old namespace. Preserve valid type-namespace placement during CI fixes, rebases, and toolchain bumps.
