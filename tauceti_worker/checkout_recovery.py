@@ -71,7 +71,7 @@ def checkpoint_repair(cfg, pr, public_head, label):
     log(f"  {label} #{pr}: checkpointed local candidate @{head[:12]} for failed-round resume")
 
 
-def arm_repair(cfg, pr, public_head, label):
+def arm_repair(cfg, pr, public_head, label, *, charged=None):
     cfg.state.mkdir(parents=True, exist_ok=True)
     atomic_json(
         cfg.state / "active-repair.json",
@@ -79,6 +79,7 @@ def arm_repair(cfg, pr, public_head, label):
             "pr": pr,
             "public_head": public_head,
             "label": label,
+            "charged": charged or {},
         },
     )
 
@@ -87,12 +88,46 @@ def disarm_repair(cfg):
     (cfg.state / "active-repair.json").unlink(missing_ok=True)
 
 
-def recover_interrupted_repair(cfg):
+def _refund_interruption(cfg, path, data, requested):
+    """Replay exact counter targets after a verified operator stop, under round.lock."""
+    from .constants import MAX_INFRA_REFUNDS
+    from .survey import Counters
+
+    counters = Counters(cfg)
+    targets = data.get("interruption_refund")
+    if targets is None:
+        charged = data.get("charged") or {}
+        resume = cfg.state / "resume" / f"{data['pr']}-{data['public_head'][:12]}.json"
+        if not requested or not charged or not resume.exists():
+            return
+        if any(counters.read(key) != value or value <= 0 for key, value in charged.items()):
+            log("interrupted repair: budget changed; retaining charges and saved candidate")
+            return
+        allowance = f"infra-{data['label']}-{data['pr']}"
+        used = counters.read(allowance)
+        if used >= MAX_INFRA_REFUNDS:
+            log(f"interrupted repair: {MAX_INFRA_REFUNDS} infrastructure refunds spent; retaining charge")
+            return
+        targets = {key: value - 1 for key, value in charged.items()}
+        targets[allowance] = used + 1
+        # Persist the intended values before any write: a killed recovery must not refund twice.
+        data["interruption_refund"] = targets
+        atomic_json(path, data)
+    for key, value in targets.items():
+        counters.write(key, value)
+    log(f"  {data['label']} #{data['pr']}: operator interruption; saved candidate and refunded attempt")
+
+
+def recover_interrupted_repair(cfg, *, operator_interrupted=False):
     path = cfg.state / "active-repair.json"
     if not path.exists():
         return
     data = json.loads(path.read_text())
-    checkpoint_repair(cfg, data["pr"], data["public_head"], data["label"])
+    # A refund journal is written only after preservation succeeded. Re-checkpointing a
+    # private commit here could replace its saved dirty stash with an empty snapshot.
+    if "interruption_refund" not in data:
+        checkpoint_repair(cfg, data["pr"], data["public_head"], data["label"])
+    _refund_interruption(cfg, path, data, operator_interrupted)
     disarm_repair(cfg)
 
 

@@ -189,6 +189,7 @@ def supervise(argv: list[str], timeout: float) -> int:
         rc = None
         last_progress = time.monotonic()
         observation_unavailable = False
+        operator_interrupted = False
 
         def sample():
             nonlocal owned
@@ -236,6 +237,11 @@ def supervise(argv: list[str], timeout: float) -> int:
                 time.sleep(POLL_INTERVAL)
             if rc is None:
                 rc = child.wait()
+        except KeyboardInterrupt:
+            # The loop translates operator SIGTERM into KeyboardInterrupt. Inactivity timeout,
+            # child failure and unknown supervisor death are deliberately not refundable here.
+            operator_interrupted = True
+            raise
         finally:
             # Capture children (including their new sessions) BEFORE sending any signal.
             # If observation fails, retain the lock and retry rather than certify cleanup.
@@ -265,7 +271,7 @@ def supervise(argv: list[str], timeout: float) -> int:
             # Only the supervisor can safely snapshot after all writers exit.
             from .checkout_recovery import recover_interrupted_repair
 
-            recover_interrupted_repair(cfg)
+            recover_interrupted_repair(cfg, operator_interrupted=operator_interrupted)
         return rc
 
 

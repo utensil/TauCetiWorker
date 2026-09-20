@@ -765,6 +765,11 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
         "Use this directory for PR bodies, admission snapshots, probes, and validation logs. "
         "Do not use fixed shared /tmp paths. Create distinct files inside this directory; "
         "publish only this round's body and verify its target against your acquired claim.\n"
+        "Before a direct Lean probe (including #check/#print), run `lake build` for its imported "
+        "modules against the current sources. `lake env lean` does not rebuild imports: this "
+        "checkout may retain .olean files from another PR or an unpublished candidate. Rebuild "
+        "after switching branches or changing dependencies, and distinguish published-head "
+        "evidence from candidate evidence. A probe pass against stale imports is not validation.\n"
     )
     argv, env = host_agent_argv(prompt, profile)
     env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch), TAUCETI_ROUND_SCRATCH=str(scratch))
