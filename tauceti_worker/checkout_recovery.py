@@ -44,20 +44,23 @@ def checkpoint_repair(cfg, pr, public_head, label):
     """Keep the existing exact-public-head resume format, including index state."""
     if not isinstance(pr, int) or pr <= 0 or not re.fullmatch(r"[0-9a-f]{40}", public_head):
         raise ValueError("invalid repair recovery identity")
-    if _git(cfg, "rev-parse", "HEAD") == public_head and not _git(
-        cfg, "status", "--porcelain", "--untracked-files=all"
-    ):
-        return
+    head = _git(cfg, "rev-parse", "HEAD")
+    directory = cfg.state / "resume"
+    record = directory / f"{pr}-{public_head[:12]}.json"
+    if not _git(cfg, "status", "--porcelain", "--untracked-files=all"):
+        # Recovery may restart after a completed checkpoint but before its caller's
+        # next write. Keep that checkpoint's dirty stash even on a private commit.
+        if head == public_head or (record.exists() and json.loads(record.read_text())["candidate_head"] == head):
+            return
     commit_ref = f"refs/tauceti-resume/{pr}/{public_head}"
     head, saved_stash = _save(cfg, commit_ref)
     stash_ref = f"refs/tauceti-resume-stash/{pr}/{public_head}" if saved_stash else None
     if saved_stash:
         _git(cfg, "update-ref", stash_ref, _git(cfg, "rev-parse", saved_stash))
         _git(cfg, "update-ref", "-d", saved_stash)
-    directory = cfg.state / "resume"
     directory.mkdir(parents=True, exist_ok=True)
     atomic_json(
-        directory / f"{pr}-{public_head[:12]}.json",
+        record,
         {
             "pr": pr,
             "public_head": public_head,
@@ -123,10 +126,7 @@ def recover_interrupted_repair(cfg, *, operator_interrupted=False):
     if not path.exists():
         return
     data = json.loads(path.read_text())
-    # A refund journal is written only after preservation succeeded. Re-checkpointing a
-    # private commit here could replace its saved dirty stash with an empty snapshot.
-    if "interruption_refund" not in data:
-        checkpoint_repair(cfg, data["pr"], data["public_head"], data["label"])
+    checkpoint_repair(cfg, data["pr"], data["public_head"], data["label"])
     _refund_interruption(cfg, path, data, operator_interrupted)
     disarm_repair(cfg)
 

@@ -55,7 +55,7 @@ class Recovery(unittest.TestCase):
         self.assertEqual((self.cfg.checkout / "tracked").read_text(), "base\nstaged\nunstaged\n")
         self.assertEqual((self.cfg.checkout / "new.lean").read_bytes(), b"-- recover me\n")
 
-    def test_supervisor_timeout_preserves_after_writers_exit(self):
+    def repair_argv(self):
         child = """import os,sys,time
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,10 +73,12 @@ subprocess.run(['git','-C',co,'add','tracked'],check=True)
 (cfg.checkout/'new.lean').write_bytes(b'-- recover me\\n')
 time.sleep(20)
 """
-        argv = [sys.executable, "-c", child, str(self.cfg.checkout), str(self.cfg.state), self.head]
+        return [sys.executable, "-c", child, str(self.cfg.checkout), str(self.cfg.state), self.head]
+
+    def test_supervisor_timeout_preserves_after_writers_exit(self):
         with (
             patch.object(ra.Config, "resolve", return_value=self.cfg),
-            patch.object(rounds, "self_argv", return_value=argv),
+            patch.object(rounds, "self_argv", return_value=self.repair_argv()),
             patch.object(ra, "POLL_INTERVAL", 0.03),
         ):
             self.assertEqual(ra.supervise([], 0.5), 124)
@@ -141,27 +143,45 @@ time.sleep(20)
         self.assertEqual(self.counter.read(self.key), 3)
         self.assert_saved()
 
-    def test_supervisor_operator_interrupt_reaches_refund_path(self):
+    def test_crash_before_refund_journal_keeps_private_candidate_stash(self):
+        (self.cfg.checkout / "committed").write_text("private candidate\n")
+        self.git("add", "committed")
+        self.git("commit", "-qm", "private candidate")
         self.arm_charged()
-        argv = [sys.executable, "-c", "import time; time.sleep(20)"]
+        atomic_json = cr.atomic_json
+
+        def fail_refund_journal(path, data):
+            if "interruption_refund" in data:
+                raise OSError("interrupted before refund journal")
+            atomic_json(path, data)
+
+        with patch.object(cr, "atomic_json", fail_refund_journal):
+            with self.assertRaises(OSError):
+                cr.recover_interrupted_repair(self.cfg, operator_interrupted=True)
+        cr.recover_interrupted_repair(self.cfg)
+        self.assertEqual(self.counter.read(self.key), 3)
+        self.assert_saved()
+
+    def test_supervisor_operator_interrupt_reaches_refund_path(self):
         sleep = time.sleep
         interrupted = False
 
         def interrupt_once(delay):
             nonlocal interrupted
-            if not interrupted and delay == ra.POLL_INTERVAL:
+            if not interrupted and delay == ra.POLL_INTERVAL and (self.cfg.checkout / "new.lean").exists():
                 interrupted = True
                 raise KeyboardInterrupt
             sleep(delay)
 
         with (
             patch.object(ra.Config, "resolve", return_value=self.cfg),
-            patch.object(rounds, "self_argv", return_value=argv),
+            patch.object(rounds, "self_argv", return_value=self.repair_argv()),
+            patch.object(ra, "POLL_INTERVAL", 0.03),
             patch.object(ra.time, "sleep", side_effect=interrupt_once),
         ):
             with self.assertRaises(KeyboardInterrupt):
                 ra.supervise([], 30)
-        self.assertEqual(self.counter.read(self.key), 2)
+        self.assertEqual(Counters(self.cfg).read(f"fix-77-{self.head[:12]}"), 2)
         self.assert_saved()
 
     def test_unbound_dirty_checkout_gets_durable_snapshot(self):

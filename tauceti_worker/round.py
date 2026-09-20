@@ -66,19 +66,15 @@ class RoundContext:
                 f"another round for worker '{self.cfg.wid}' holds {path} — one round per worker at a time"
             ) from None
         self._fd = fd
-        try:
-            if not self._supervised:
-                from .round_activity import refuse_surviving_work
+        if not self._supervised:
+            from .round_activity import refuse_surviving_work
 
+            try:
                 refuse_surviving_work(self.cfg)
-            from .checkout_recovery import recover_interrupted_repair
-
-            # Finish any interrupted preservation/refund before the survey reads attempt budgets.
-            recover_interrupted_repair(self.cfg)
-        except BaseException:
-            os.close(fd)
-            self._fd = None
-            raise
+            except BaseException:
+                os.close(fd)
+                self._fd = None
+                raise
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
         atexit.register(self._cleanup)

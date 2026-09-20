@@ -161,6 +161,10 @@ def refuse_surviving_work(cfg: Config) -> None:
         snapshot = processes()
         if any(alive(identity, snapshot) for identity in identities):
             raise Die("previous round still owns live work; refusing checkout reuse")
+    from .checkout_recovery import recover_interrupted_repair
+
+    # Finish prior recovery before starting a child or admitting a new survey/charge.
+    recover_interrupted_repair(cfg)
 
 
 def supervise(argv: list[str], timeout: float) -> int:
