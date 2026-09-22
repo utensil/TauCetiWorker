@@ -40,6 +40,7 @@ RUN_STDLIB=(
   codex_fallback.py
   contest_claim.py
   dispatch_revalidation.py
+  fd_pressure_retry.py
   fix_diagnostic.py
   fork_authoring.py
   github_failure_reason.py
