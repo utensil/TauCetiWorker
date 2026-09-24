@@ -28,9 +28,32 @@ Preserve the applicable approvals you identified while clearing the unresolved b
 For each finding, judge whether it is actually correct:
 - **If it is correct**, fix the code. Verify the fix empirically (does it build? does the claimed Mathlib lemma actually exist — `grep`/`#check`? does the suggested `@[simp]` lemma have a variable head, which the linter forbids?). Reviewers are sometimes confidently wrong; do not blindly comply.
 - Before adding or restoring `@[simp]`, run the actual environment lint with all candidate rules active. A locally compiling theorem can still violate `simpNF`; a failed lint driver is an incomplete check, never a pass. When a requested attribute fails, keep the useful theorem without that attribute and contest the attribute request with the exact compiler/linter evidence.
-- **If it is wrong**, do NOT comply. Reply on that rubric's thread explaining why, with evidence (a synth-check, a Mathlib citation, a build error). Post the reply to the thread root:
-  `gh api -X POST "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies" -f body="..."`
-  (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.) Before making a public claim about code on the PR, re-read the published head and verify the cited declarations/behavior at that exact head; identify any evidence from an unpublished local candidate explicitly.
+- **If it is wrong**, do NOT comply. Reply on that rubric's thread explaining why,
+  with evidence (a synth-check, a Mathlib citation, a build error). Write the exact
+  Markdown to a unique file in this round's scratch directory using a quoted heredoc
+  (`<<'EOF'`) and real line breaks. This preserves backticks and dollar signs.
+  Set `reply_file` to that file's path, then post and verify the stored body:
+
+```bash
+reply_id=$(gh api -X POST '/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies' \
+  -F "body=@$reply_file" --jq .id)
+gh api "/repos/TauCetiProject/TauCeti/pulls/comments/$reply_id" > "$reply_file.published.json"
+python3 - "$reply_file" "$reply_file.published.json" <<'PY'
+import json
+import pathlib
+import sys
+expected = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
+actual = json.loads(pathlib.Path(sys.argv[2]).read_text())["body"]
+if actual != expected:
+    raise SystemExit("published reply differs from source file")
+PY
+```
+  If the readback differs, stop and correct the public reply before continuing.
+  Never place Markdown in an inline shell argument or encode paragraph breaks as
+  literal `\\n` sequences. A re-review reads these replies, so a well-evidenced
+  contest can clear a wrong finding. Before making a public claim about code on
+  the PR, re-read the published head and verify the cited declarations/behavior
+  at that exact head; identify unpublished local candidate evidence explicitly.
 
 ## Discussion-only rounds
 If the next action is only an evidence-backed reply or a report of a review-contract contradiction,
@@ -86,7 +109,7 @@ A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU
 ## Submit
 Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
-- Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
+- Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Write the complete message to a round-local file with real line breaks and use `git commit -F "$message_file"`; inspect `git log -1 --format=%B` afterward. Do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:
   ```
   "__BIN__/git-safe-push"
