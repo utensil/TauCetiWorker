@@ -90,6 +90,9 @@ cases = [
     ("legacy finding", {}, ["request_changes"], [], [999]),
     ("legacy approval", {}, ["approve"], [], []),
 ]
+# Coverage alone is insufficient: do not let missing names mask a broken state check.
+for state in ("absent", "stale", "error", "unknown"):
+    cases.append((f"complete coverage with {state} slot", all_green | {"reuse": state}, ["approve"], [999], []))
 
 fails = 0
 with (
