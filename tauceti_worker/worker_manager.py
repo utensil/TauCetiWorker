@@ -35,7 +35,7 @@ from .paths import HERE, ensure_ssl_cert_file, entry_cmd, self_argv, self_env
 from .quota import parse_pace_curve
 from .review_scope import ReviewAuthorSpecError, normalize_review_author_specs
 from .round import signal_group
-from .runtime_status import STATUS_ENV, read_json, update_status
+from .runtime_status import STATUS_ENV, read_json, retry_fd_pressure, update_status
 
 CONFIG_VERSION = 1
 DEFAULT_INTERVAL = 2.0
@@ -479,7 +479,7 @@ class WorkerSpec:
 
 def load_worker_specs(path: Path) -> list[WorkerSpec]:
     try:
-        with path.open("rb") as src:
+        with retry_fd_pressure(lambda: path.open("rb")) as src:
             raw = tomllib.load(src)
     except FileNotFoundError:
         raise WorkersError(f"configuration does not exist: {path}") from None

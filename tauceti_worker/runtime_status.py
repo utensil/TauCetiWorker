@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -14,9 +15,20 @@ STATUS_ENV = "TAUCETI_RUNTIME_STATUS"
 _RICH_STYLE_RE = re.compile(r"\[(?:/?(?:bold|red|yellow|green|dim)(?: [^]]+)?|/)\]")
 
 
+def retry_fd_pressure(op):
+    """Try I/O at most four times on ENFILE/EMFILE; all other errors fail immediately."""
+    for attempt in range(4):
+        try:
+            return op()
+        except OSError as exc:
+            if exc.errno not in (errno.ENFILE, errno.EMFILE) or attempt == 3:
+                raise
+            time.sleep(0.05 * 2**attempt)
+
+
 def read_json(path: Path, *, strict: bool = False) -> dict:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(retry_fd_pressure(path.read_text))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, TypeError):
@@ -29,6 +41,10 @@ def read_json(path: Path, *, strict: bool = False) -> dict:
 
 
 def atomic_json(path: Path, value: dict) -> None:
+    retry_fd_pressure(lambda: _atomic_json_once(path, value))
+
+
+def _atomic_json_once(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     tmp = Path(raw)
@@ -50,7 +66,7 @@ def update_status(path: Path, **changes) -> dict:
     """Merge changes into a status file under a sibling flock and replace it atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
-    with lock_path.open("a+") as lock:
+    with retry_fd_pressure(lambda: lock_path.open("a+")) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # An unreadable existing record is unknown, not an empty record. Otherwise
         # one failed heartbeat read can erase the active round's ownership token.
