@@ -499,7 +499,7 @@ _fd_pressure_logged = 0
 
 
 def publish_fd_pressure() -> None:
-    """Report absorbed descriptor pressure once per change (cheap when nothing happened)."""
+    """Report descriptor retry activity once per change, without implying it recovered."""
     global _fd_pressure_logged
     stats = fd_pressure_stats()
     retries = int(stats.get("fd_pressure_retries") or 0)
@@ -513,8 +513,7 @@ def publish_fd_pressure() -> None:
     except OSError:
         manager_fds = -1
     print(
-        f"tauceti workers: absorbed transient file-descriptor pressure: retries={retries} "
-        f"last={when} manager_fds={manager_fds}",
+        f"tauceti workers: file-descriptor pressure: retries={retries} last={when} manager_fds={manager_fds}",
         file=sys.stderr,
         flush=True,
     )
@@ -1000,6 +999,7 @@ def run_manager(config: Path, interval: float = DEFAULT_INTERVAL) -> int:
                     "pid": os.getpid(),
                     "config": str(config),
                     "error": last_error,
+                    "transient_error": last_transient_error,
                     "fd_pressure": fd_pressure_stats(),
                 }
             if action == "restart":
@@ -1045,6 +1045,7 @@ def run_manager(config: Path, interval: float = DEFAULT_INTERVAL) -> int:
                         continue
                 except WorkersError as exc:
                     specs = last_good or []
+                    last_transient_error = None
                     error = str(exc)
                     if error != last_error:
                         print(

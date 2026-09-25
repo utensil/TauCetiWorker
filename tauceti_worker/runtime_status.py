@@ -24,12 +24,12 @@ _FD_PRESSURE_LAST: float | None = None
 
 
 def is_fd_pressure(exc: BaseException) -> bool:
-    """True when ``exc`` is the kernel momentarily running out of file descriptors."""
+    """True for a process or system descriptor shortage, which may be transient or sustained."""
     return isinstance(exc, OSError) and exc.errno in _FD_PRESSURE_ERRNOS
 
 
 def fd_pressure_stats() -> dict:
-    """Retry counters, so a report can show real pressure instead of inferring a leak."""
+    """Process-local retries attempted, including retries that did not recover."""
     return {"fd_pressure_retries": _FD_PRESSURE_RETRIES, "fd_pressure_last": _FD_PRESSURE_LAST}
 
 
@@ -73,8 +73,8 @@ def read_json(path: Path, *, strict: bool = False) -> dict:
 
 
 def atomic_json(path: Path, value: dict) -> None:
-    # The temp file plus the replace are the two places a status write needs a new descriptor, so a
-    # burst can fail either one; retry the whole sequence so a half-written temp is never renamed.
+    # Retry the complete atomic write so every attempt uses a fresh temp file and failed attempts
+    # preserve the previous record. Creating the temp file requires a new descriptor.
     retry_fd_pressure(lambda: _atomic_json_once(path, value), label="atomic_json")
 
 

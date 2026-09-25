@@ -8,13 +8,15 @@ retry briefly, stay bounded, and never be confused with a broken configuration.
 
 from __future__ import annotations
 
+import contextlib
 import errno
-import inspect
+import io
 import json
 import tempfile
 from pathlib import Path
 from unittest import mock
 
+from tauceti_worker import worker_manager as wm
 from tauceti_worker.runtime_status import (
     atomic_json,
     fd_pressure_stats,
@@ -128,9 +130,6 @@ else:  # pragma: no cover
     raise AssertionError("retry_fd_pressure must re-raise the original error")
 assert len(calls) == 2, f"attempts must be honouring the bound, saw {len(calls)}"
 
-# Older runtime worktrees predate the strict-read change (PR #47); the retry fix must not depend on it.
-STRICT_SUPPORTED = "strict" in inspect.signature(read_json).parameters
-
 # 6. read_json absorbs one burst but keeps its contract: non-strict tolerates, strict surfaces.
 with tempfile.TemporaryDirectory(prefix="fd-pressure-read-") as raw:
     target = Path(raw) / "status.json"
@@ -150,14 +149,13 @@ with tempfile.TemporaryDirectory(prefix="fd-pressure-read-") as raw:
     def always_fail(self, *args, **kwargs):
         raise ENFILE
 
-    if STRICT_SUPPORTED:
-        with mock.patch.object(Path, "read_text", always_fail):
-            try:
-                read_json(target, strict=True)
-            except OSError as exc:
-                assert exc.errno == errno.ENFILE, exc
-            else:  # pragma: no cover
-                raise AssertionError("strict reads must surface sustained pressure")
+    with mock.patch.object(Path, "read_text", always_fail):
+        try:
+            read_json(target, strict=True)
+        except OSError as exc:
+            assert exc.errno == errno.ENFILE, exc
+        else:  # pragma: no cover
+            raise AssertionError("strict reads must surface sustained pressure")
     with mock.patch.object(Path, "read_text", always_fail):
         assert read_json(target) == {}, "non-strict reads stay tolerant after the bound"
 
@@ -165,7 +163,7 @@ with tempfile.TemporaryDirectory(prefix="fd-pressure-read-") as raw:
 #    manager stops reporting "invalid configuration" for a kernel-level fd shortage.
 with tempfile.TemporaryDirectory(prefix="fd-pressure-config-") as raw:
     config = Path(raw) / "workers.toml"
-    config.write_text('version = 1\nworkers = []\n')
+    config.write_text("version = 1\nworkers = []\n")
     assert load_worker_specs(config) == [], "the control case must load"
 
     def enfile_open(self, *args, **kwargs):
@@ -191,5 +189,126 @@ with tempfile.TemporaryDirectory(prefix="fd-pressure-config-") as raw:
         pass
     else:  # pragma: no cover
         raise AssertionError("a broken TOML must raise WorkersError")
+
+# 8. Both descriptor-shortage errnos use the bounded retry policy.
+for code in (errno.ENFILE, errno.EMFILE):
+    failure = OSError(code, "injected descriptor pressure")
+    operation = mock.Mock(side_effect=[failure, failure, "recovered"])
+    with mock.patch("tauceti_worker.runtime_status.time.sleep") as sleep:
+        assert retry_fd_pressure(operation) == "recovered"
+    assert operation.call_count == 3 and sleep.call_count == 2
+
+# 9. A failure after the temp file is written must preserve the old record and clean up the temp.
+with tempfile.TemporaryDirectory(prefix="fd-pressure-replace-") as raw:
+    target = Path(raw) / "worker.json"
+    atomic_json(target, {"round_work": {"token": "owned"}})
+    old = target.read_text()
+    real_replace = wm.os.replace
+    replacements: list[Path] = []
+
+    def flaky_replace(src, dst):
+        replacements.append(Path(src))
+        assert target.read_text() == old, "a failed replace must leave the previous record intact"
+        if len(replacements) <= 2:
+            raise ENFILE
+        return real_replace(src, dst)
+
+    with (
+        mock.patch("tauceti_worker.runtime_status.os.replace", flaky_replace),
+        mock.patch("tauceti_worker.runtime_status.time.sleep"),
+    ):
+        atomic_json(target, {"alive": True})
+    assert read_json(target) == {"alive": True}
+    assert len(set(replacements)) == 3 and all(not p.exists() for p in replacements)
+
+    old = target.read_text()
+    with (
+        mock.patch("tauceti_worker.runtime_status.os.replace", side_effect=ENFILE),
+        mock.patch("tauceti_worker.runtime_status.time.sleep"),
+    ):
+        try:
+            atomic_json(target, {"alive": False})
+        except OSError as exc:
+            assert exc.errno == errno.ENFILE
+        else:
+            raise AssertionError("sustained replace failure must surface")
+    assert target.read_text() == old
+    assert list(Path(raw).iterdir()) == [target], "failed attempts must leave no temp files"
+
+# 10. An unreadable status must not erase existing ownership when update_status merges changes.
+with tempfile.TemporaryDirectory(prefix="fd-pressure-preserve-") as raw:
+    target = Path(raw) / "worker.json"
+    atomic_json(target, {"round_work": {"token": "owned"}})
+    old = target.read_text()
+    with (
+        mock.patch.object(Path, "read_text", side_effect=ENFILE),
+        mock.patch("tauceti_worker.runtime_status.time.sleep"),
+    ):
+        try:
+            update_status(target, alive=True)
+        except OSError as exc:
+            assert exc.errno == errno.ENFILE
+        else:
+            raise AssertionError("an unreadable ownership record must not be replaced")
+    assert target.read_text() == old
+
+# 11. Failed retry batches must not be reported as recovered/absorbed; unchanged counters are silent.
+output = io.StringIO()
+with mock.patch.object(wm, "_fd_pressure_logged", 0), contextlib.redirect_stderr(output):
+    wm.publish_fd_pressure()
+    wm.publish_fd_pressure()
+assert len(output.getvalue().splitlines()) == 1
+assert "retries=" in output.getvalue() and "absorbed" not in output.getvalue()
+
+# 12. Exercise the actual manager loop through startup pressure, recovery, pressure with a last-good
+#     generation, invalid config, renewed pressure, and recovery. Only the I/O boundaries are mocked.
+with tempfile.TemporaryDirectory(prefix="fd-pressure-manager-", dir="/tmp") as raw:
+    root = Path(raw)
+    spec = wm.WorkerSpec(id="retained")
+    (root / "state").mkdir()
+    (root / "state" / "retained.json").write_text("{}")
+    replies: list[dict] = []
+    server = mock.Mock()
+    output = io.StringIO()
+
+    def serve(server, handle):
+        reply = handle({"action": "ping"})
+        assert handle({"action": "apply"}) == reply
+        replies.append(reply)
+        if len(replies) == 6:
+            handle({"action": "shutdown"})
+
+    with (
+        mock.patch.object(wm, "workers_runtime_dir", return_value=root / "run"),
+        mock.patch.object(wm, "workers_state_dir", return_value=root / "state"),
+        mock.patch.object(wm, "_bind_socket", return_value=server),
+        mock.patch.object(wm.select, "select", return_value=([server], [], [])),
+        mock.patch.object(wm, "_serve_one", side_effect=serve),
+        mock.patch.object(
+            wm,
+            "load_worker_specs",
+            side_effect=[
+                WorkersTransientError("pressure"),
+                [spec],
+                WorkersTransientError("pressure"),
+                WorkersError("broken config"),
+                WorkersTransientError("pressure"),
+                [spec],
+            ],
+        ),
+        mock.patch.object(wm, "runner_status", return_value={"alive": True, "spec_hash": spec.fingerprint()}) as status,
+        mock.patch.object(wm, "_launch_runner") as launch,
+        mock.patch.object(wm, "_stop_runner") as stop,
+        contextlib.redirect_stderr(output),
+    ):
+        assert wm.run_manager(root / "workers.toml", interval=0.1) == 0
+    assert [reply["transient_error"] for reply in replies] == ["pressure", None, "pressure", None, "pressure", None]
+    assert [reply["error"] for reply in replies] == [None, None, None, "broken config", "broken config", None]
+    assert output.getvalue().count("transient host condition") == 3, (
+        "new pressure after a config fault must be reported"
+    )
+    assert [call.args[0] for call in status.call_args_list] == ["retained"] * 5
+    launch.assert_not_called()
+    stop.assert_not_called()
 
 print("fd pressure retry checks passed")
