@@ -756,7 +756,18 @@ def host_agent_argv(prompt: str, profile: AuthoringProfile | str) -> tuple[list[
 
 def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logdir: Path) -> int:
     profile = _authoring_profile(profile)
+    # Keep scratch evidence alongside this worker's logs for interrupted-round recovery.
+    scratch_root = logdir.resolve() / "scratch"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix="round-", dir=scratch_root))
+    prompt += (
+        f"\n\nRound scratch directory: {scratch}\n"
+        "Use this directory for PR bodies, admission snapshots, probes, and validation logs. "
+        "Do not use fixed shared /tmp paths. Create distinct files inside this directory; "
+        "publish only this round's body and verify its target against your acquired claim.\n"
+    )
     argv, env = host_agent_argv(prompt, profile)
+    env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch), TAUCETI_ROUND_SCRATCH=str(scratch))
     if os.environ.get("TAUCETI_AGENT_ECHO"):
         print(f"HOST cwd={cwd}\n  " + " ".join(_shq(a) for a in argv))
         return 0

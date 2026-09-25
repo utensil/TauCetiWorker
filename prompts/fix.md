@@ -28,9 +28,15 @@ Preserve the applicable approvals you identified while clearing the unresolved b
 For each finding, judge whether it is actually correct:
 - **If it is correct**, fix the code. Verify the fix empirically (does it build? does the claimed Mathlib lemma actually exist — `grep`/`#check`? does the suggested `@[simp]` lemma have a variable head, which the linter forbids?). Reviewers are sometimes confidently wrong; do not blindly comply.
 - Before adding or restoring `@[simp]`, run the actual environment lint with all candidate rules active. A locally compiling theorem can still violate `simpNF`; a failed lint driver is an incomplete check, never a pass. When a requested attribute fails, keep the useful theorem without that attribute and contest the attribute request with the exact compiler/linter evidence.
-- **If it is wrong**, do NOT comply. Reply on that rubric's thread explaining why, with evidence (a synth-check, a Mathlib citation, a build error). Post the reply to the thread root:
-  `gh api -X POST "/repos/TauCetiProject/TauCeti/pulls/__PR__/comments/<ROOT_ID>/replies" -f body="..."`
-  (A re-review reads these replies, so a well-evidenced contest can clear a wrong finding.) Before making a public claim about code on the PR, re-read the published head and verify the cited declarations/behavior at that exact head; identify any evidence from an unpublished local candidate explicitly.
+- **If it is wrong**, do NOT comply. Reply to that rubric's thread root explaining why,
+  with evidence (a synth-check, a Mathlib citation, a build error). Preserve the
+  intended Markdown in the published reply, including real paragraph breaks,
+  backticks, and dollar signs; do not publish visible escaped newline sequences.
+  Read the reply back and compare it with the intended text. Correct any mismatch
+  before continuing. A re-review reads these replies, so a well-evidenced contest
+  can clear a wrong finding. Before making a public claim about code on the PR,
+  re-read the published head and verify the cited declarations/behavior at that
+  exact head; identify unpublished local candidate evidence explicitly.
 
 ## Discussion-only rounds
 If the next action is only an evidence-backed reply or a report of a review-contract contradiction,
@@ -41,6 +47,16 @@ Do not create an empty commit or push just to complete such a round. If citing e
 identify its exact head and source; report it as prior evidence, not a fresh check. Preserve and
 identify any unpublished local changes separately. If you make source changes for publication,
 the full verification and safe-push requirements below apply.
+
+Before direct Lean probes, run a targeted `lake build` for the probe's direct imports at the source
+revision being claimed; Lake handles transitive dependencies and reuses valid cached artifacts.
+Fetch missing Mathlib artifacts with `lake exe cache get` when needed; this does not validate
+TauCeti artifacts. Do not routinely clean caches or force recompilation. Run the probe only after
+the targeted build succeeds, and reuse validated dependencies while their inputs remain unchanged.
+`lake env lean` and `#check`/`#print` load existing `.olean` files without validating their freshness.
+Serialize cache extraction, builds, and probes within the checkout. For a contested replacement,
+test the unchanged published control and the replacement against the same dependencies validated
+by Lake. Keep probes and their output in this round's scratch directory.
 
 ## Rules of the repo (hard constraints)
 - Code goes under `TauCeti/`. Do NOT edit the root `TauCeti.lean`: it is intentionally empty, and the lakefile's glob (`TauCeti.*`) builds every module under `TauCeti/`, so there is no need to touch it (if a reviewer claims your API is not reachable from the root, the glob already covers it). Do NOT touch `Scripts/`, `.github/`, the lakefile (`lakefile.toml`/`lakefile.lean`), or the Lake pins (`lake-manifest.json`/`lean-toolchain`) — the lakefile is human-owned, and forward Mathlib/toolchain bumps are a separate dedicated flow; keep this PR to `TauCeti/`.
@@ -76,7 +92,7 @@ A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU
 ## Submit
 Keep the Worker-provided push destination and expected head unchanged; do not override them with `origin`. On failure, inspect Git's actual diagnostic: permission and transport errors are not evidence of a concurrent push.
 
-- Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Use real line breaks; do not add an AI co-author trailer or literal `\\n` escapes.
+- Commit the fixes with an informative conventional subject (`<type>: <subject>`, imperative present) and a substantive body. Preserve real line breaks in the committed message and read it back to verify its formatting. Do not add an AI co-author trailer or literal `\\n` escapes.
 - Push with the project's safe wrapper — and ONLY the wrapper:
   ```
   "__BIN__/git-safe-push"

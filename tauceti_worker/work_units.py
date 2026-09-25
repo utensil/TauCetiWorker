@@ -1324,7 +1324,15 @@ def _do_fixlike(
     if not (p.head_owner and p.head_repo and p.head_ref):
         log(f"  {label} #{pr}: head repo deleted/unavailable — skipping")
         return None
-    if not w.claims.begin_branch_work(pr, head, p.head_ref, p.head_owner, p.head_repo):
+    try:
+        acquired = w.claims.begin_branch_work(pr, head, p.head_ref, p.head_owner, p.head_repo)
+    except NoProgress as exc:
+        _refund_infra_failure(w, c, label, charged, reason=str(exc))
+        raise  # Once the bounded infrastructure allowance is spent, keep the charge and back off.
+    if not acquired:
+        # Cooperative dedup is not a repair attempt; another candidate can still run this round.
+        for key in charged:
+            w.counters.write(key, max(0, w.counters.read(key) - 1))
         return None  # claimed elsewhere → caller tries the next candidate
     prompt = fill_prompt(HERE / "prompts" / prompt_file, PR=pr, AGENT=opts.agent_name, BIN=wrapper_bin(bubble))
     if bubble:
@@ -1391,7 +1399,7 @@ def _do_fixlike(
         # exact public head that admitted this round, not against the private checkpoint commit.
         os.environ["TAUCETI_PUSH_EXPECT"] = head if reuse or resumed else checked
         log(f"  {label} #{pr}: checked out @ {checked[:12]}")
-        arm_repair(w.cfg, c.pr, c.head, label)
+        arm_repair(w.cfg, c.pr, c.head, label, charged={key: w.counters.read(key) for key in charged})
         rc = run_agent_host(co, prompt, _effective_authoring_profile(opts), w.cfg.logdir)
     if rc == 0:
         if not bubble:
