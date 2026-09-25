@@ -6,7 +6,6 @@ import errno
 import fcntl
 import json
 import os
-import random
 import re
 import tempfile
 import time
@@ -15,52 +14,21 @@ from pathlib import Path
 STATUS_ENV = "TAUCETI_RUNTIME_STATUS"
 _RICH_STYLE_RE = re.compile(r"\[(?:/?(?:bold|red|yellow|green|dim)(?: [^]]+)?|/)\]")
 
-# ENFILE (the kernel's system-wide file table) and EMFILE (this process's table) are burst
-# conditions on a loaded host: the manager's status writes are usually the first syscalls that
-# need a *new* descriptor, so they fail while everything else still works. Retry them briefly.
-_FD_PRESSURE_ERRNOS = frozenset({errno.ENFILE, errno.EMFILE})
-_FD_PRESSURE_RETRIES = 0
-_FD_PRESSURE_LAST: float | None = None
 
-
-def is_fd_pressure(exc: BaseException) -> bool:
-    """True for a process or system descriptor shortage, which may be transient or sustained."""
-    return isinstance(exc, OSError) and exc.errno in _FD_PRESSURE_ERRNOS
-
-
-def fd_pressure_stats() -> dict:
-    """Process-local retries attempted, including retries that did not recover."""
-    return {"fd_pressure_retries": _FD_PRESSURE_RETRIES, "fd_pressure_last": _FD_PRESSURE_LAST}
-
-
-def retry_fd_pressure(op, *, attempts: int = 4, base: float = 0.05, cap: float = 0.4, label: str = ""):
-    """Run ``op`` again when the kernel is momentarily out of descriptors.
-
-    Bounded on purpose: ``attempts`` tries with exponential backoff plus jitter, then the original
-    error is raised, so a *sustained* exhaustion still surfaces instead of being hidden. Any other
-    error (including a real permission or config problem) propagates on the first attempt.
-    """
-    global _FD_PRESSURE_RETRIES, _FD_PRESSURE_LAST
-    last_error: OSError | None = None
-    for attempt in range(attempts):
+def retry_fd_pressure(op):
+    """Try I/O at most four times on ENFILE/EMFILE; all other errors fail immediately."""
+    for attempt in range(4):
         try:
             return op()
         except OSError as exc:
-            if not is_fd_pressure(exc):
+            if exc.errno not in (errno.ENFILE, errno.EMFILE) or attempt == 3:
                 raise
-            last_error = exc
-            if attempt == attempts - 1:
-                break
-            _FD_PRESSURE_RETRIES += 1
-            _FD_PRESSURE_LAST = time.time()
-            time.sleep(min(cap, base * 2**attempt) + random.uniform(0, base))
-    assert last_error is not None  # only reachable after a caught OSError
-    raise last_error
+            time.sleep(0.05 * 2**attempt)
 
 
 def read_json(path: Path, *, strict: bool = False) -> dict:
     try:
-        value = json.loads(retry_fd_pressure(path.read_text, attempts=3, label="read_json"))
+        value = json.loads(retry_fd_pressure(path.read_text))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, TypeError):
@@ -73,9 +41,7 @@ def read_json(path: Path, *, strict: bool = False) -> dict:
 
 
 def atomic_json(path: Path, value: dict) -> None:
-    # Retry the complete atomic write so every attempt uses a fresh temp file and failed attempts
-    # preserve the previous record. Creating the temp file requires a new descriptor.
-    retry_fd_pressure(lambda: _atomic_json_once(path, value), label="atomic_json")
+    retry_fd_pressure(lambda: _atomic_json_once(path, value))
 
 
 def _atomic_json_once(path: Path, value: dict) -> None:
@@ -100,10 +66,7 @@ def update_status(path: Path, **changes) -> dict:
     """Merge changes into a status file under a sibling flock and replace it atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
-    # Opening the sibling lock file is the first new descriptor a status write needs, and it is the
-    # operation observed failing with ENFILE during the 2026-09-19/20 bursts; retry just that.
-    lock = retry_fd_pressure(lambda: lock_path.open("a+"), label="status_lock")
-    with lock:
+    with retry_fd_pressure(lambda: lock_path.open("a+")) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         # An unreadable existing record is unknown, not an empty record. Otherwise
         # one failed heartbeat read can erase the active round's ownership token.

@@ -35,7 +35,7 @@ from .paths import HERE, ensure_ssl_cert_file, entry_cmd, self_argv, self_env
 from .quota import parse_pace_curve
 from .review_scope import ReviewAuthorSpecError, normalize_review_author_specs
 from .round import signal_group
-from .runtime_status import STATUS_ENV, fd_pressure_stats, is_fd_pressure, read_json, retry_fd_pressure, update_status
+from .runtime_status import STATUS_ENV, read_json, retry_fd_pressure, update_status
 
 CONFIG_VERSION = 1
 DEFAULT_INTERVAL = 2.0
@@ -102,15 +102,6 @@ full reference:
 
 class WorkersError(Exception):
     pass
-
-
-class WorkersTransientError(WorkersError):
-    """A momentary kernel/environment condition, not an operator-actionable configuration fault.
-
-    Kept distinct so the manager does not report "invalid configuration" when the host merely ran
-    out of file descriptors for a moment: that alarm trains operators to ignore the message that
-    also means a genuinely broken workers.toml.
-    """
 
 
 def workers_die(message: str) -> NoReturn:
@@ -486,56 +477,13 @@ class WorkerSpec:
         return argv
 
 
-def _retry_config_open(path: Path):
-    """Open the workers.toml, absorbing a momentary burst of descriptor exhaustion.
-
-    The timing policy lives in the shared helper so the config read, the status lock and the atomic
-    status write all back off the same way.
-    """
-    return retry_fd_pressure(lambda: path.open("rb"), attempts=3, label="config_read")
-
-
-_fd_pressure_logged = 0
-
-
-def publish_fd_pressure() -> None:
-    """Report descriptor retry activity once per change, without implying it recovered."""
-    global _fd_pressure_logged
-    stats = fd_pressure_stats()
-    retries = int(stats.get("fd_pressure_retries") or 0)
-    if retries == _fd_pressure_logged:
-        return
-    _fd_pressure_logged = retries
-    last = stats.get("fd_pressure_last")
-    when = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(float(last))) if last else "n/a"
-    try:
-        manager_fds = len(os.listdir("/dev/fd"))
-    except OSError:
-        manager_fds = -1
-    print(
-        f"tauceti workers: file-descriptor pressure: retries={retries} last={when} manager_fds={manager_fds}",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
 def load_worker_specs(path: Path) -> list[WorkerSpec]:
     try:
-        # A burst of ENFILE/EMFILE on a loaded host must not be reported as a broken configuration.
-        src = None
-        try:
-            src = _retry_config_open(path)
+        with retry_fd_pressure(lambda: path.open("rb")) as src:
             raw = tomllib.load(src)
-        finally:
-            if src is not None:
-                src.close()
     except FileNotFoundError:
         raise WorkersError(f"configuration does not exist: {path}") from None
-    except tomllib.TOMLDecodeError as exc:
-        raise WorkersError(f"cannot read {path}: {exc}") from None
-    except OSError as exc:
-        if is_fd_pressure(exc):
-            raise WorkersTransientError(f"transient file-descriptor pressure reading {path}: {exc}") from None
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         raise WorkersError(f"cannot read {path}: {exc}") from None
     if not isinstance(raw, dict):
         raise WorkersError(f"{path} must contain a TOML table")
@@ -980,7 +928,6 @@ def run_manager(config: Path, interval: float = DEFAULT_INTERVAL) -> int:
         launch_failures: dict[str, tuple[str, int, float]] = {}
         last_good: list[WorkerSpec] | None = None
         last_error: str | None = None
-        last_transient_error: str | None = None
 
         def stop(signum=None, frame=None) -> None:
             nonlocal exiting, stop_workers
@@ -994,14 +941,7 @@ def run_manager(config: Path, interval: float = DEFAULT_INTERVAL) -> int:
             nonlocal exiting, stop_workers
             action = req.get("action")
             if action in ("ping", "apply"):
-                return {
-                    "ok": True,
-                    "pid": os.getpid(),
-                    "config": str(config),
-                    "error": last_error,
-                    "transient_error": last_transient_error,
-                    "fd_pressure": fd_pressure_stats(),
-                }
+                return {"ok": True, "pid": os.getpid(), "config": str(config), "error": last_error}
             if action == "restart":
                 wid = req.get("id")
                 if not isinstance(wid, str):
@@ -1017,35 +957,12 @@ def run_manager(config: Path, interval: float = DEFAULT_INTERVAL) -> int:
         print(f"tauceti workers: managing {config} every {interval:g}s", flush=True)
         try:
             while not exiting:
-                # Cheap no-op unless the retry counters moved; tells the report what the host did
-                # instead of letting the operator infer a leak from a single ENFILE line.
-                publish_fd_pressure()
                 try:
                     specs = load_worker_specs(config)
                     last_good = specs
                     last_error = None
-                    last_transient_error = None
-                except WorkersTransientError as exc:
-                    # Keep the last good generation and keep serving. Deliberately does not set
-                    # ``last_error``: a momentary host condition must not masquerade as the
-                    # configuration fault that the same message would otherwise report.
-                    specs = last_good or []
-                    error = str(exc)
-                    if error != last_transient_error:
-                        print(
-                            f"tauceti workers: transient host condition, keeping last good generation: {error}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                    last_transient_error = error
-                    if last_good is None:
-                        ready, _, _ = select.select([server], [], [], max(0.1, interval))
-                        if ready:
-                            _serve_one(server, handle)
-                        continue
                 except WorkersError as exc:
                     specs = last_good or []
-                    last_transient_error = None
                     error = str(exc)
                     if error != last_error:
                         print(
