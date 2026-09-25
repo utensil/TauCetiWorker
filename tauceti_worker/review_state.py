@@ -28,6 +28,23 @@ from .github import GitHub
 
 META_RE = re.compile(r"<!--tauceti-meta:v1 (.*?)-->", re.S)
 
+# Keep aligned with TauCetiReview's runner/review.py DEFAULT_RUBRICS: the merge gate
+# requires all of these, even when a reply round publishes only a subset of states.
+REQUIRED_RUBRICS = frozenset(
+    {
+        "api-design",
+        "attribution",
+        "correctness",
+        "documentation",
+        "generality",
+        "naming",
+        "placement",
+        "proof-quality",
+        "reuse",
+        "scope",
+    }
+)
+
 
 @dataclass
 class Meta:
@@ -266,15 +283,16 @@ class ReviewState:
         """Return the reviewed head when rubrics are green or awaiting an author fix.
 
         An intentional blocker may defer other rubrics; it needs an author fix, not an
-        automatic retry. Without a blocker, absent/stale slots still need review after
-        a budget stop. A partial successful run must not hide another rubric's error.
+        automatic retry. Without a blocker, missing/absent/stale required slots still
+        need review. A partial successful run must not hide another rubric's error.
         """
         metadata = self.gh_meta(pr).data
         states = metadata.get("states") or {}
         if states:
             blockers = {"blocking_request", "blocking_block"}
             values = set(states.values())
-            if values == {"green"} or (values <= blockers | {"green", "stale", "absent"} and values & blockers):
+            all_green = REQUIRED_RUBRICS <= states.keys() and values == {"green"}
+            if all_green or (values <= blockers | {"green", "stale", "absent"} and values & blockers):
                 return str(metadata.get("head_sha") or "")
             return ""
         runs = metadata.get("runs") or []

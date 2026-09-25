@@ -12,6 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import tauceti_worker as tc
+from tauceti_worker.review_state import REQUIRED_RUBRICS
 
 
 class FakeRS:
@@ -96,7 +97,7 @@ clean_cases = [
     ),
     (
         "durable repaired state supersedes an old error run",
-        {"head_sha": HEAD, "states": {"reuse": "green"}, "runs": [{"verdict": "error"}]},
+        {"head_sha": HEAD, "states": dict.fromkeys(REQUIRED_RUBRICS, "green"), "runs": [{"verdict": "error"}]},
         HEAD,
     ),
     (

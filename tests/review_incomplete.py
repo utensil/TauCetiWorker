@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Full-survey regression: budget-deferred rubric slots must remain reviewable.
+"""Full-survey regression: incomplete rubric coverage must remain reviewable.
 
-The review engine can stop for its daily budget before completing every rubric.
+The review engine can stop for its daily budget or publish only a reply's rubric.
 Once budget is available, an unchanged head must return to review unless an actual
 author finding explains the deferred slots. Exercise both review and fix queues.
 """
@@ -51,8 +51,28 @@ raw_pr = {
     "labels": [],
 }
 
+# Spell out the merge policy's rubric names independently of the implementation.
+all_green = dict.fromkeys(
+    (
+        "api-design",
+        "attribution",
+        "correctness",
+        "documentation",
+        "generality",
+        "naming",
+        "placement",
+        "proof-quality",
+        "reuse",
+        "scope",
+    ),
+    "green",
+)
+
 # (description, durable rubric states, latest verdicts, review candidates, fix candidates)
 cases = [
+    ("one green rubric is incomplete", {"reuse": "green"}, ["approve"], [999], []),
+    ("one missing rubric is incomplete", {k: v for k, v in all_green.items() if k != "scope"}, [], [999], []),
+    ("unknown names cannot fill coverage", {f"other-{i}": "green" for i in range(10)}, [], [999], []),
     ("budget stop after approval", {"naming": "green", "reuse": "absent"}, ["approve"], [999], []),
     ("budget stop before any new call", {"naming": "stale", "reuse": "absent"}, [], [999], []),
     ("stale slot still needs review", {"naming": "green", "reuse": "stale"}, ["approve"], [999], []),
@@ -60,10 +80,11 @@ cases = [
     ("finding beside execution error", {"naming": "blocking_request", "reuse": "error"}, ["error"], [999], [999]),
     ("intentional block halt", {"correctness": "blocking_block", "reuse": "absent"}, ["block"], [], [999]),
     ("retained finding with deferred slots", {"naming": "blocking_request", "reuse": "stale"}, [], [], [999]),
+    ("retained finding with missing slots", {"naming": "blocking_request"}, [], [], [999]),
     ("unknown slot requires review", {"naming": "green", "reuse": "unknown"}, ["approve"], [999], []),
     ("finding cannot hide unknown slot", {"naming": "blocking_block", "reuse": "unknown"}, [], [999], [999]),
-    ("all approved", {"naming": "green", "reuse": "green"}, ["approve"], [], []),
-    ("durable green supersedes old error", {"naming": "green", "reuse": "green"}, ["error"], [], []),
+    ("all approved", all_green, ["approve"], [], []),
+    ("durable green supersedes old error", all_green, ["error"], [], []),
     ("absent-only skeleton", {"naming": "absent", "reuse": "absent"}, [], [999], []),
     ("legacy error", {}, ["error"], [999], []),
     ("legacy finding", {}, ["request_changes"], [], [999]),
