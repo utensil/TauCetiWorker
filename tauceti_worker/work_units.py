@@ -94,9 +94,7 @@ from .survey import (
     Candidate,
     Counters,
     Survey,
-    blocking_rubric_key,
     bust_progress_cache,
-    fix_blocker_streak,
     fix_disposition,
     prioritize_review_candidates,
     progress_argv,
@@ -750,13 +748,6 @@ def _still_actionable(stage: str, w: Worker, sv: Survey, c: Candidate) -> bool:
             blocking,
             w.counters.read(f"fix-{c.pr}-{c.head[:12]}"),
             pending_contest=pending_contest,
-            blocker_streak=fix_blocker_streak(
-                w.counters,
-                c.pr,
-                blocking_rubric_key(meta),
-                c.head,
-                meta,
-            ),
             retry_exhausted_fixes=(
                 getattr(sv, "retry_exhausted_fixes", False)
                 and getattr(sv, "tend_scope", "author") == "owned"
@@ -1428,14 +1419,6 @@ def do_fix(w, sv, c, opts, bubble) -> int | None:
     pr, head = c.pr, c.head
     key = f"fix-{pr}-{head[:12]}"
     w.counters.incr(key)  # count up front (an un-checkout-able PR mustn't loop)
-    blocker_key = getattr(c, "blocker_key", "")
-    blocker_streak = getattr(c, "blocker_streak", 0)
-    write_record = getattr(w.counters, "write_fix_blocker", None)
-    if blocker_key and blocker_streak and write_record is not None:
-        write_record(
-            pr,
-            {"head": head, "key": blocker_key, "streak": blocker_streak},
-        )
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="fix.md", label="fix", charged=(key,))
 
 

@@ -65,6 +65,11 @@ by Lake. Keep probes and their output in this round's scratch directory.
 - Must stay green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and **never silence a linter** (e.g. with `set_option ... false`) to force a change through — that is itself a reason to push back on the finding.
 
 ## Verify before pushing (all commands MUST pass)
+Before validation and again before publication, compare the complete proposed PR diff
+against current `main`, including uncommitted and new files. If the repair removes the
+last coherent contribution to the PR's target, preserve the candidate and report that
+disposition for human attention; do not publish an empty shell or invent replacement scope.
+
 Run this gate when publishing source changes. A discussion-only round follows the evidence checks
 above and may finish without running this gate or the Submit section.
 ```
