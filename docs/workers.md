@@ -139,6 +139,11 @@ For an explicit unlimited recovery of a spent fix budget, set
 unlimited additional attempts per unchanged head. They are
 deliberately rejected for author-wide maintenance.
 
+Changing the PR head does not erase the cross-head review-loop guard. After two
+consecutive reviewed heads retain the same blocking rubric set, automatic fixes
+pause for human adjudication; resetting a per-head counter or enabling the
+override does not bypass that guard.
+
 Review allowlists remain command-local from the Worker's perspective. The
 manager stores launcher desired state, then emits `review_roadmap`, `review_pr`, and
 `review_author` only as explicit CLI arguments to the loop; it does not translate

@@ -25,6 +25,7 @@ from .constants import (
     MAX_CI_ATTEMPTS,
     MAX_CI_PR_ATTEMPTS,
     MAX_FIX_ATTEMPTS,
+    MAX_UNCHANGED_BLOCKER_ROUNDS,
     MAX_OPEN_PRS,
     MAX_PROGRESS_ERRORS,
     MAX_REBASE_ATTEMPTS,
@@ -47,6 +48,7 @@ from .constants import (
 from .github import GitHub, GitHubError, _parse_iso8601, can_push, me
 from .owned_prs import OwnedPRs
 from .review_state import Meta, ReviewState
+from .runtime_status import atomic_json
 
 # ============================================================================
 # Counters — state/<wid>/... single-integer counter files.
@@ -72,6 +74,16 @@ class Counters:
         v = self.read(name) + 1
         self.write(name, v)
         return v
+
+    def read_fix_blocker(self, pr: int) -> dict:
+        try:
+            value = json.loads((self.state / f"fix-blocker-{pr}.json").read_text())
+        except (OSError, ValueError, TypeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def write_fix_blocker(self, pr: int, value: dict) -> None:
+        atomic_json(self.state / f"fix-blocker-{pr}.json", value)
 
 
 # ============================================================================
@@ -192,6 +204,8 @@ class Candidate:
     budget: int = 0
     contest: str = ""  # set to the contested rubric when this is an author-contest re-review
     contest_reply_id: int = 0  # the review-comment id of the contesting reply (the 👀 claim anchor)
+    blocker_key: str = ""  # stable blocking-rubric set used to stop cross-head repair loops
+    blocker_streak: int = 0  # consecutive reviewed heads carrying blocker_key
     ready_at: int | None = None  # when this exact review unit became actionable
     preferred_reviewer: str = ""  # latest scoreboard publisher; gets a short first refusal
 
@@ -479,6 +493,39 @@ def spread_candidates(candidates: list, rng=random) -> list:
     return out
 
 
+def blocking_rubric_key(meta: Meta) -> str:
+    """Return the stable rubric set that currently blocks a scoreboard."""
+    states = meta.data.get("states") or {}
+    if states:
+        return ",".join(sorted(str(rubric) for rubric, state in states.items() if state not in ("green", "stale")))
+    return ",".join(
+        sorted(
+            str(run.get("rubric"))
+            for run in (meta.data.get("runs") or [])
+            if isinstance(run, dict) and run.get("verdict") not in ("approve", "error") and run.get("rubric")
+        )
+    )
+
+
+def fix_blocker_streak(counters: Counters, pr: int, key: str, head: str, meta: Meta) -> int:
+    """Count consecutive changed heads carrying the same blocking rubric set."""
+    if not key or str(meta.data.get("head_sha") or "") != head:
+        return 0
+    read_record = getattr(counters, "read_fix_blocker", None)
+    previous = read_record(pr) if read_record is not None else {}
+    if previous.get("key") != key:
+        return 1
+    if previous.get("head") == head:
+        try:
+            return max(1, int(previous.get("streak", 1)))
+        except (TypeError, ValueError):
+            return 1
+    try:
+        return max(1, int(previous.get("streak", 1)) + 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _review_age_weight(candidate: Candidate, now: float) -> float:
     """Linear aging with a one-day cap; unknown/future timestamps stay at the base weight."""
     waited = max(0.0, now - candidate.ready_at) if candidate.ready_at is not None else 0.0
@@ -536,6 +583,7 @@ def fix_disposition(
     per_head: int,
     *,
     pending_contest: bool = False,
+    blocker_streak: int = 0,
     retry_exhausted_fixes: bool = False,
 ) -> tuple[str, str]:
     """Classify a tended PR for the `fix` stage from its scoreboard meta. Returns (disposition, reason):
@@ -585,6 +633,12 @@ def fix_disposition(
         # review adjudicates that reply, the durable scoreboard remains blocking at the same head;
         # scheduling another fixer would only burn the per-head budget on the identical finding.
         return ("waiting", "author contest awaiting re-review")
+    if blocker_streak > MAX_UNCHANGED_BLOCKER_ROUNDS:
+        return (
+            "exhausted",
+            "the same blocking rubric persisted across "
+            f"{blocker_streak} reviewed heads — needs human adjudication",
+        )
     if per_head >= MAX_FIX_ATTEMPTS and not retry_exhausted_fixes:
         return (
             "exhausted",
@@ -930,6 +984,8 @@ def survey(
             meta = rs.gh_meta(p.number)
             blocking = rs.ledger_blocking(p.number, p.head_oid)
             per_head = counters.read(f"fix-{p.number}-{p.head_oid[:12]}")
+            blocker_key = blocking_rubric_key(meta)
+            blocker_streak = fix_blocker_streak(counters, p.number, blocker_key, p.head_oid, meta)
             pending_contest = False
             if blocking and str(meta.data.get("head_sha") or "") == p.head_oid:
                 reply = rs.newest_contest_reply(p.number)
@@ -943,6 +999,7 @@ def survey(
                 blocking,
                 per_head,
                 pending_contest=pending_contest,
+                blocker_streak=blocker_streak,
                 retry_exhausted_fixes=retry_exhausted_fixes,
             )
             if disp == "skip":
@@ -954,6 +1011,8 @@ def survey(
                     "blocking review at head",
                     attempts=per_head,
                     budget=0 if retry_exhausted_fixes else MAX_FIX_ATTEMPTS,
+                    blocker_key=blocker_key,
+                    blocker_streak=blocker_streak,
                 )
                 sv.needs_fix.actionable.append(c)
                 continue
@@ -965,6 +1024,8 @@ def survey(
                     "blocking review at head",
                     attempts=per_head,
                     budget=0 if retry_exhausted_fixes else MAX_FIX_ATTEMPTS,
+                    blocker_key=blocker_key,
+                    blocker_streak=blocker_streak,
                 )
                 sv.needs_fix.suppressed.append(c)
 

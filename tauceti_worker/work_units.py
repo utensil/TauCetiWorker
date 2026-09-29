@@ -1419,6 +1419,14 @@ def do_fix(w, sv, c, opts, bubble) -> int | None:
     pr, head = c.pr, c.head
     key = f"fix-{pr}-{head[:12]}"
     w.counters.incr(key)  # count up front (an un-checkout-able PR mustn't loop)
+    blocker_key = getattr(c, "blocker_key", "")
+    blocker_streak = getattr(c, "blocker_streak", 0)
+    write_record = getattr(w.counters, "write_fix_blocker", None)
+    if blocker_key and blocker_streak and write_record is not None:
+        write_record(
+            pr,
+            {"head": head, "key": blocker_key, "streak": blocker_streak},
+        )
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="fix.md", label="fix", charged=(key,))
 
 
