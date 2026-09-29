@@ -25,13 +25,13 @@ from .constants import (
     MAX_CI_ATTEMPTS,
     MAX_CI_PR_ATTEMPTS,
     MAX_FIX_ATTEMPTS,
-    MAX_UNCHANGED_BLOCKER_ROUNDS,
     MAX_OPEN_PRS,
     MAX_PROGRESS_ERRORS,
     MAX_REBASE_ATTEMPTS,
     MAX_REVIEW_CONTESTS,
     MAX_REVIEW_CONTESTS_PER_RUBRIC,
     MAX_REVIEW_ERRORS,
+    MAX_UNCHANGED_BLOCKER_ROUNDS,
     PROGRESS,
     PROGRESS_ATTEMPT_GAP,
     PROGRESS_REF,
@@ -494,15 +494,22 @@ def spread_candidates(candidates: list, rng=random) -> list:
 
 
 def blocking_rubric_key(meta: Meta) -> str:
-    """Return the stable rubric set that currently blocks a scoreboard."""
+    """Return only the actionable blocking rubric set.
+
+    Stale, absent, and execution-error slots are review incompleteness, not source
+    findings; including them made the loop guard change identity as the scoreboard
+    filled in.
+    """
     states = meta.data.get("states") or {}
     if states:
-        return ",".join(sorted(str(rubric) for rubric, state in states.items() if state not in ("green", "stale")))
+        return ",".join(
+            sorted(str(rubric) for rubric, state in states.items() if state in ("blocking_request", "blocking_block"))
+        )
     return ",".join(
         sorted(
             str(run.get("rubric"))
             for run in (meta.data.get("runs") or [])
-            if isinstance(run, dict) and run.get("verdict") not in ("approve", "error") and run.get("rubric")
+            if isinstance(run, dict) and run.get("verdict") in ("request_changes", "block") and run.get("rubric")
         )
     )
 
@@ -636,8 +643,7 @@ def fix_disposition(
     if blocker_streak > MAX_UNCHANGED_BLOCKER_ROUNDS:
         return (
             "exhausted",
-            "the same blocking rubric persisted across "
-            f"{blocker_streak} reviewed heads — needs human adjudication",
+            f"the same blocking rubric persisted across {blocker_streak} reviewed heads — needs human adjudication",
         )
     if per_head >= MAX_FIX_ATTEMPTS and not retry_exhausted_fixes:
         return (

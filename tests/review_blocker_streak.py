@@ -9,8 +9,8 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from tauceti_worker.survey import Counters, blocking_rubric_key, fix_blocker_streak, fix_disposition
 from tauceti_worker.review_state import Meta
+from tauceti_worker.survey import Counters, blocking_rubric_key, fix_blocker_streak, fix_disposition
 
 
 def check(name, value):
@@ -27,6 +27,10 @@ meta = Meta(
     "fresh",
 )
 fails += not check("blocking key keeps only unresolved rubrics", blocking_rubric_key(meta) == "correctness")
+fails += not check(
+    "stale review slots do not become blockers",
+    blocking_rubric_key(Meta({"head_sha": "a" * 40, "states": {"correctness": "stale"}}, "fresh")) == "",
+)
 
 with TemporaryDirectory(prefix="review-blocker-") as raw:
     counters = Counters(SimpleNamespace(state=Path(raw)))
