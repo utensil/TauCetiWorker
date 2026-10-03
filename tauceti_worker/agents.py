@@ -800,6 +800,8 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
         log(f"lake artifacts: made {changed} restored build output(s) writable")
     argv, env = host_agent_argv(prompt, profile)
     env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch), TAUCETI_ROUND_SCRATCH=str(scratch))
+    if not os.environ.get("TAUCETI_AGENT_ECHO"):
+        env.update(prepare_host_lake_cache(cwd, scratch))
     if os.environ.get("TAUCETI_AGENT_ECHO"):
         print(f"HOST cwd={cwd}\n  " + " ".join(_shq(a) for a in argv))
         return 0
@@ -1068,6 +1070,48 @@ TAUCETI_CACHE_DOMAIN = "cache.taucetiproject.org"
 TAUCETI_CACHE_SERVICE = "tauceti-public"
 TAUCETI_CACHE_ARTIFACT_URL = f"https://{TAUCETI_CACHE_DOMAIN}/artifacts"
 TAUCETI_CACHE_REVISION_URL = f"https://{TAUCETI_CACHE_DOMAIN}/revisions"
+
+
+def prepare_host_lake_cache(cwd: Path, scratch: Path) -> dict[str, str]:
+    """Restore TauCeti's public Lake outputs before a host agent starts.
+
+    Bubble supplies this bootstrap itself, but host rounds previously ran only the Mathlib cache
+    command from their prompts and silently rebuilt the whole TauCeti tree.  Keep the config
+    round-local and make a cache failure visible without blocking the agent's repair work.
+    """
+    config = scratch / "lake-cache.toml"
+    config.write_text(
+        'cache.defaultService = "tauceti-public"\n'
+        "[[cache.service]]\n"
+        'name = "tauceti-public"\n'
+        'kind = "s3"\n'
+        f'artifactEndpoint = "{TAUCETI_CACHE_ARTIFACT_URL}"\n'
+        f'revisionEndpoint = "{TAUCETI_CACHE_REVISION_URL}"\n'
+    )
+    env = {
+        "LAKE_CONFIG": str(config),
+        "LAKE_ARTIFACT_CACHE": "true",
+        "LAKE_RESTORE_ARTIFACTS": "true",
+    }
+    logf = scratch / "lake-cache.log"
+    try:
+        with logf.open("w") as stream:
+            result = subprocess.run(
+                ["lake", "cache", "get", "--service", TAUCETI_CACHE_SERVICE, "--repo", TAUCETI],
+                cwd=cwd,
+                env={**os.environ, **env},
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                timeout=600,
+                check=False,
+            )
+        if result.returncode:
+            log(f"warning: TauCeti Lake cache restore exited {result.returncode}; see {logf}")
+        else:
+            log(f"TauCeti Lake cache restored; see {logf}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"warning: TauCeti Lake cache restore unavailable ({exc}); see {logf}")
+    return env
 
 
 def bubble_cmd() -> list[str]:
