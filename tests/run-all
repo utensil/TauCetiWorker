@@ -54,6 +54,7 @@ RUN_STDLIB=(
   isolate_home_macos.py
   isolate_home_paths.py
   kiro.py
+  lake_artifact_permissions.py
   ledger_blocking.py
   loop_sigterm.py
   mirror_creds.py
