@@ -109,7 +109,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `roadmap_extra_identities` | string list | `[]` | Extra GitHub logins whose claimed intentions count as this worker's own |
 | `review_roadmap` | string list | `[]` | Roadmap labels admitted to review, forwarded only as `--review-roadmap` CLI arguments |
 | `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
-| `review_author` | string list | `[]` | GitHub authors as `login` or `login:decimal-probability` (default `1.0`), sampled once per round and then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
+| `review_author` | string list | `[]` | GitHub authors as `login` (priority) or `login:decimal-probability` (peer strength); after all configured authors are surveyed, an eligible priority author takes precedence and otherwise one eligible peer is selected proportionally, then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
 | `tend_scope` | string | `"author"` | Maintenance PR scope: `author` preserves legacy author-wide tending; `owned` tends only PR numbers recorded for this worker id |
 | `max_open_prs` | positive integer | `8` | Roadmap authoring backpressure for this worker only; changing it does not affect other workers |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
@@ -146,9 +146,11 @@ them into environment variables or mutable worker state. Put a private
 `workers.toml` under the operations project when the approval list itself is
 private.
 
-Author probabilities are decimal values from `0.0` through `1.0`, not
-percentages. Each round uses a timestamp seed to compute the final allowed-author
-array before the existing roadmap OR explicit-PR OR author union is applied.
+Peer strengths are decimal values from `0.0` through `1.0`, not percentages. A
+review-only round surveys every configured author, gives an eligible priority
+author precedence, and otherwise selects one eligible peer with probability
+proportional to its configured value. Explicit PR and roadmap scopes remain
+unconditional members of the union.
 
 ### Owned maintenance scope
 

@@ -50,20 +50,34 @@ def normalize_review_author_specs(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(token(item) for item in sorted(by_login.items()))
 
 
-def sample_review_authors(specs: Iterable[str], *, timestamp: int | None = None) -> tuple[list[str], int | None]:
-    """Compute this round's ordinary allowed-author array from normalized specifications.
+def author_logins(specs: Iterable[str]) -> tuple[str, ...]:
+    """Return the normalized logins in an author-scope specification."""
+    return tuple(
+        login for login, _ in (_parse_review_author_spec(spec) for spec in normalize_review_author_specs(specs))
+    )
 
-    The timestamp is the random seed and is returned for observable/reproducible logs. Entries with
-    the default probability 1.0 are always present; all other decisions are independent draws.
-    """
+
+def select_review_authors(
+    specs: Iterable[str], eligible_authors: Iterable[str], *, timestamp: int | None = None
+) -> tuple[list[str], int | None]:
+    """Select eligible authors: priority entries first, otherwise one weighted peer."""
     normalized = normalize_review_author_specs(specs)
-    if not normalized:
-        return [], None
     seed = time.time_ns() if timestamp is None else timestamp
+    if not normalized:
+        return [], seed
     rng = random.Random(seed)
-    allowed: list[str] = []
-    for spec in normalized:
-        login, probability = _parse_review_author_spec(spec)
-        if probability == 1 or rng.random() < float(probability):
-            allowed.append(login)
-    return allowed, seed
+    eligible = {author.casefold() for author in eligible_authors}
+    parsed = [_parse_review_author_spec(spec) for spec in normalized]
+    priority = [login for login, probability in parsed if probability == 1 and login in eligible]
+    if priority:
+        return priority, seed
+    weighted = [(login, probability) for login, probability in parsed if probability > 0 and login in eligible]
+    if not weighted:
+        return [], seed
+    total = sum((probability for _, probability in weighted), start=Decimal(0))
+    draw = rng.random() * float(total)
+    for login, probability in weighted:
+        draw -= float(probability)
+        if draw < 0:
+            return [login], seed
+    return [weighted[-1][0]], seed

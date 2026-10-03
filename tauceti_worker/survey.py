@@ -49,6 +49,7 @@ from .constants import (
 )
 from .github import GitHub, GitHubError, _parse_iso8601, can_push, me
 from .owned_prs import OwnedPRs
+from .review_scope import author_logins
 from .review_state import Meta, ReviewState
 
 # ============================================================================
@@ -418,7 +419,7 @@ def scope_review_candidates(sv: Survey, roadmaps: list[str], prs: list[int], aut
         return
     allowed_areas = {area.casefold() for area in roadmaps}
     allowed_prs = set(prs)
-    allowed_authors = {author.casefold() for author in authors}
+    allowed_authors = set(author_logins(authors))
     info = {pr.number: pr for pr in sv.open_prs}
     kept: list[Candidate] = []
     for candidate in sv.reviewable.actionable:
@@ -447,7 +448,7 @@ def scoped_review_pr_json(gh: GitHub, roadmaps: list[str], prs: list[int], autho
     allowed = set(prs)
     if roadmaps or authors:
         areas = {area.casefold() for area in roadmaps}
-        author_logins = {author.casefold() for author in authors}
+        allowed_author_logins = set(author_logins(authors))
         index_fields = (
             PR_SCOPE_UNION_INDEX_FIELDS
             if roadmaps and authors
@@ -458,7 +459,7 @@ def scoped_review_pr_json(gh: GitHub, roadmaps: list[str], prs: list[int], autho
         for item in gh.open_pr_index(tuple(index_fields)):
             info = PRInfo.from_json(item)
             area_match = bool(areas.intersection(area.casefold() for area in pr_roadmap_areas(info)))
-            if area_match or info.author.casefold() in author_logins:
+            if area_match or info.author.casefold() in allowed_author_logins:
                 allowed.add(info.number)
 
     out: list[dict] = []

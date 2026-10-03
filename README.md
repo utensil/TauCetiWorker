@@ -144,12 +144,14 @@ tauceti work --loop --skip roadmap    # everything except authoring new PRs
 Review loops can be rationed without replacing the Worker's normal eligibility, shuffle, claims,
 pacing, or one-round dispatch. `--review-roadmap <area>`, `--review-pr <number>`, and
 `--review-author <login[:probability]>` are repeatable and also accept comma-separated values. An
-omitted author probability defaults to `1.0`; a decimal probability from `0.0` through `1.0` samples
-that author independently once per round using a timestamp seed. The sampled result is an ordinary
-allowed-author array; probability does not alter the union below. When any scope flag is present,
+an omitted author value marks a priority author; a decimal value from `0.0` through `1.0` is a peer's
+relative selection strength. The review-only survey reads all configured authors, then gives an eligible
+priority author precedence; otherwise it selects one eligible peer with probability proportional to the
+configured values. This keeps an idle worker from filtering every peer out before it knows who has work.
+When any scope flag is present,
 an actionable review candidate is retained when its PR number is explicitly allowed **or** one of its
 `roadmap/<area>` labels is allowed **or** its author is allowed. The allowlists therefore form one
-union; candidates outside it are filtered before the Worker shuffles and selects. An explicit PR or
+union; candidates outside it are filtered before author selection and the Worker shuffles and selects. An explicit PR or
 author can admit an unlabelled or `roadmap/Unknown` candidate. Omit all three flags to keep the upstream
 unscoped review queue.
 

@@ -86,6 +86,7 @@ from .review_diagnostics import (
     recover_review_failures,
 )
 from .review_freshness import verify_review_source
+from .review_scope import author_logins, select_review_authors
 from .review_state import ReviewState
 from .round import Claims, RoundContext
 from .runtime_status import atomic_json, report_failure, report_runtime, runtime_snapshot
@@ -96,6 +97,7 @@ from .survey import (
     Survey,
     bust_progress_cache,
     fix_disposition,
+    pr_roadmap_areas,
     prioritize_review_candidates,
     progress_argv,
     spread_candidates,
@@ -134,6 +136,7 @@ class RoundOpts:
     review_scope_roadmaps: list[str] = field(default_factory=list)
     review_scope_prs: list[int] = field(default_factory=list)
     review_scope_authors: list[str] = field(default_factory=list)
+    review_scope_author_specs: list[str] = field(default_factory=list)
     review_scope_requested: bool = False
     tend_scope: str = "author"
     max_open_prs: int = MAX_OPEN_PRS
@@ -163,6 +166,47 @@ class Worker:
     counters: Counters
     rc: RoundContext
     claims: Claims
+
+
+def select_scoped_review_candidates(sv: Survey, opts: RoundOpts) -> None:
+    """Choose an eligible author after the scoped survey has discovered all configured authors.
+
+    Explicit PR and roadmap scopes remain unconditional members of their union. Author-only
+    candidates use priority authors first; otherwise one eligible peer wins a weighted draw, so an
+    idle worker cannot discard every peer before it knows who has work.
+    """
+    specs = getattr(opts, "review_scope_author_specs", ())
+    if not specs:
+        return
+    info = {pr.number: pr for pr in sv.open_prs}
+    allowed_areas = {area.casefold() for area in getattr(opts, "review_scope_roadmaps", ())}
+    allowed_prs = set(getattr(opts, "review_scope_prs", ()))
+    configured_author_logins = set(author_logins(specs))
+    author_candidates: list[Candidate] = []
+    explicit_candidates: list[Candidate] = []
+    for candidate in sv.reviewable.actionable:
+        pr = info.get(candidate.pr)
+        author_match = bool(pr and pr.author.casefold() in configured_author_logins)
+        area_match = bool(pr and allowed_areas.intersection(area.casefold() for area in pr_roadmap_areas(pr)))
+        explicit_match = candidate.pr in allowed_prs or area_match
+        if author_match and not explicit_match:
+            author_candidates.append(candidate)
+        else:
+            explicit_candidates.append(candidate)
+
+    eligible_authors = {info[candidate.pr].author for candidate in author_candidates if candidate.pr in info}
+    selected, seed = select_review_authors(specs, eligible_authors)
+    selected_set = set(selected)
+    sv.reviewable.actionable = explicit_candidates + [
+        candidate
+        for candidate in author_candidates
+        if candidate.pr in info and info[candidate.pr].author.casefold() in selected_set
+    ]
+    log(
+        f"review author selection: configured={','.join(specs)}; "
+        f"eligible={','.join(sorted(eligible_authors, key=str.casefold)) or 'none'}; "
+        f"selected={','.join(selected) or 'none'}; seed={seed}"
+    )
 
 
 def _bubble(stage: str, opts: RoundOpts) -> bool:
@@ -469,6 +513,9 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
             continue
         sv.kind(stage).actionable = spread_candidates(sv.kind(stage).actionable)
     _prioritize_continuation(w, sv)
+
+    if want(opts.only, "review"):
+        select_scoped_review_candidates(sv, opts)
 
     # The undocumented review throttles, off unless an expert asked for them. Applied here rather than
     # in survey() so they steer only what this round PICKS: the survey (and so `status`, the dashboard,
