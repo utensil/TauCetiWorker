@@ -761,8 +761,9 @@ def make_lake_build_outputs_writable(cwd: Path) -> int:
     """Make restored Lake products replaceable before a host build reuses them.
 
     Lake's artifact restore can materialize `.ilean`/`.olean` products read-only. A later build that
-    needs to regenerate one then fails with EACCES, so repair only the existing build outputs; source
-    files and the cache store are outside this boundary.
+    needs to regenerate one then fails with EACCES. Lake may hard-link a restored output to its cache;
+    detach that read-only link before changing permissions so the shared cache remains immutable.
+    Source files and the cache store are outside this boundary.
     """
     build = cwd / ".lake" / "build"
     if not build.is_dir():
@@ -774,8 +775,22 @@ def make_lake_build_outputs_writable(cwd: Path) -> int:
             if path.is_symlink():
                 continue
             try:
-                mode = path.stat().st_mode
-                if not mode & 0o200:
+                info = path.stat()
+                mode = info.st_mode
+                if info.st_nlink > 1 and not mode & 0o200:
+                    fd, temporary = tempfile.mkstemp(dir=path.parent)
+                    os.close(fd)
+                    try:
+                        shutil.copy2(path, temporary)
+                        os.chmod(temporary, mode | 0o200)
+                        os.replace(temporary, path)
+                    finally:
+                        try:
+                            os.unlink(temporary)
+                        except FileNotFoundError:
+                            pass
+                    changed += 1
+                elif not mode & 0o200:
                     path.chmod(mode | 0o200)
                     changed += 1
             except OSError as exc:
@@ -1553,7 +1568,12 @@ def bubble_work_cmd(inner: str) -> str:
         "fi; "
         "fi; "
         'rm -f "$tc_log"; '
-        "if [ -d .lake/build ]; then find .lake/build -type f -exec chmod u+w {} +; fi; "
+        "if [ -d .lake/build ]; then "
+        "find .lake/build -type f ! -perm -u+w -exec sh -c "
+        '\'for path do tmp="$path.tauceti-copy.$$"; '
+        'cp "$path" "$tmp" && chmod u+w "$tmp" && mv "$tmp" "$path"; '
+        "done' sh {} +; "
+        "fi; "
         "if ! timeout 1800 lake build; then "
         "echo 'warning: pre-agent lake build failed or timed out; the agent starts from a red tree' >&2; "
         "fi; "
