@@ -1506,7 +1506,7 @@ def bubble_work_cmd(inner: str) -> str:
         "fi; "
         "fi; "
         'rm -f "$tc_log"; '
-        'if [ -d .lake/build ]; then find .lake/build -type f -exec chmod u+w {} +; fi; '
+        "if [ -d .lake/build ]; then find .lake/build -type f -exec chmod u+w {} +; fi; "
         "if ! timeout 1800 lake build; then "
         "echo 'warning: pre-agent lake build failed or timed out; the agent starts from a red tree' >&2; "
         "fi; "
