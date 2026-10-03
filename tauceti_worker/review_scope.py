@@ -60,14 +60,7 @@ def author_logins(specs: Iterable[str]) -> tuple[str, ...]:
 def select_review_authors(
     specs: Iterable[str], eligible_authors: Iterable[str], *, timestamp: int | None = None
 ) -> tuple[list[str], int | None]:
-    """Select eligible author scope using priority authors and relative probability weights.
-
-    A probability-1 author is a priority author: if any such author has actionable review work,
-    all eligible priority authors are selected. Otherwise one eligible author with a positive
-    probability is selected, with each author's chance proportional to its configured value. This
-    makes probabilities useful for choosing among available work instead of accidentally filtering
-    every peer out before eligibility is known.
-    """
+    """Select eligible authors: priority entries first, otherwise one weighted peer."""
     normalized = normalize_review_author_specs(specs)
     seed = time.time_ns() if timestamp is None else timestamp
     if not normalized:
@@ -88,22 +81,3 @@ def select_review_authors(
         if draw < 0:
             return [login], seed
     return [weighted[-1][0]], seed
-
-
-def sample_review_authors(specs: Iterable[str], *, timestamp: int | None = None) -> tuple[list[str], int | None]:
-    """Compatibility helper for callers that still need independent author draws.
-
-    Review loops use :func:`select_review_authors`, which selects from eligible authors after the
-    survey. This helper preserves the historical stateless sampling behavior for external callers.
-    """
-    normalized = normalize_review_author_specs(specs)
-    if not normalized:
-        return [], None
-    seed = time.time_ns() if timestamp is None else timestamp
-    rng = random.Random(seed)
-    allowed: list[str] = []
-    for spec in normalized:
-        login, probability = _parse_review_author_spec(spec)
-        if probability == 1 or rng.random() < float(probability):
-            allowed.append(login)
-    return allowed, seed

@@ -172,8 +172,8 @@ def select_scoped_review_candidates(sv: Survey, opts: RoundOpts) -> None:
     """Choose an eligible author after the scoped survey has discovered all configured authors.
 
     Explicit PR and roadmap scopes remain unconditional members of their union. Author-only
-    candidates use probability-1 authors as a priority tier; otherwise one eligible author wins a
-    weighted draw, so an idle worker cannot discard every peer before it knows who has work.
+    candidates use priority authors first; otherwise one eligible peer wins a weighted draw, so an
+    idle worker cannot discard every peer before it knows who has work.
     """
     specs = getattr(opts, "review_scope_author_specs", ())
     if not specs:

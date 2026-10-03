@@ -177,8 +177,8 @@ def add_review_scope_flags(p: argparse.ArgumentParser) -> None:
         action="append",
         default=None,
         metavar="LOGIN[:PROB][,LOGIN[:PROB]...]",
-        help="allow review candidates authored by these GitHub logins, optionally sampled each round "
-        "with a decimal probability (default 1.0); repeatable and comma-separated. Unioned with "
+        help="allow review candidates authored by these GitHub logins; an omitted value is priority "
+        "and a decimal value is peer selection strength. Repeatable and comma-separated. Unioned with "
         "--review-roadmap and --review-pr",
     )
 

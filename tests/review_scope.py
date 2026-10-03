@@ -217,27 +217,14 @@ check(
     ("contributor-a", "contributor-b:0.3"),
 )
 check(
-    "timestamp seed includes a 0.3 author",
-    tc.sample_review_authors(["always", "sometimes:0.3"], timestamp=123),
-    (["always", "sometimes"], 123),
-)
-check(
-    "timestamp seed excludes a 0.3 author",
-    tc.sample_review_authors(["always", "sometimes:0.3"], timestamp=2),
-    (["always"], 2),
-)
-check(
-    "probability zero produces an empty final author array", tc.sample_review_authors(["never:0"], timestamp=1), ([], 1)
-)
-check(
     "author scope separates logins from selection weights",
-    tc.author_logins(["utensil", "peer:0.5"]),
-    ("peer", "utensil"),
+    tc.author_logins(["primary", "peer:0.5"]),
+    ("peer", "primary"),
 )
 check(
     "eligible priority author wins over peers",
-    tc.select_review_authors(["utensil", "peer:0.5"], ["peer", "utensil"], timestamp=0),
-    (["utensil"], 0),
+    tc.select_review_authors(["primary", "peer:0.5"], ["peer", "primary"], timestamp=0),
+    (["primary"], 0),
 )
 check(
     "eligible peer selection uses relative probability",
@@ -390,7 +377,7 @@ try:
 
     sv = tc.Survey(worker_id="test")
     sv.open_prs = [
-        tc.PRInfo.from_json(raw_pr(10, author="utensil")),
+        tc.PRInfo.from_json(raw_pr(10, author="primary")),
         tc.PRInfo.from_json(raw_pr(11, author="peer-a")),
         tc.PRInfo.from_json(raw_pr(12, author="peer-b")),
     ]
@@ -401,8 +388,8 @@ try:
         work_model="codex",
         sandbox_host=True,
         dry_run=True,
-        review_scope_authors=["peer-a", "peer-b", "utensil"],
-        review_scope_author_specs=["peer-a:0.1", "peer-b:0.5", "utensil"],
+        review_scope_authors=["peer-a", "peer-b", "primary"],
+        review_scope_author_specs=["peer-a:0.1", "peer-b:0.5", "primary"],
     )
     tc.select_scoped_review_candidates(sv, opts)
     check("priority author excludes peers when own work is eligible", [c.pr for c in sv.reviewable.actionable], [10])
@@ -422,7 +409,7 @@ try:
 
     sv = tc.Survey(worker_id="test")
     sv.open_prs = [
-        tc.PRInfo.from_json(raw_pr(10, author="utensil")),
+        tc.PRInfo.from_json(raw_pr(10, author="primary")),
         tc.PRInfo.from_json(raw_pr(11, author="peer-a", labels=("roadmap/Explicit",))),
     ]
     sv.reviewable.actionable = [tc.Candidate(10, "head10"), tc.Candidate(11, "head11")]
@@ -441,9 +428,9 @@ try:
         review_scope_requested=True,
         scoped_review_only=True,
     )
-    check("an empty sampled author array remains scoped", sv.review_query_scoped, True)
-    check("an empty sampled author array hydrates nothing", gh.view_calls, [])
-    check("an empty sampled author array cannot widen to upstream", [c.pr for c in sv.reviewable.actionable], [])
+    check("an empty author scope remains scoped", sv.review_query_scoped, True)
+    check("an empty author scope hydrates nothing", gh.view_calls, [])
+    check("an empty author scope cannot widen to upstream", [c.pr for c in sv.reviewable.actionable], [])
 
     index = [raw_pr(8, author="Contributor-A")]
     gh = FakeGH(index=index, views={8: raw_pr(8, author="someone-else")})
