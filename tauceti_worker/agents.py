@@ -761,8 +761,9 @@ def make_lake_build_outputs_writable(cwd: Path) -> int:
     """Make restored Lake products replaceable before a host build reuses them.
 
     Lake's artifact restore can materialize `.ilean`/`.olean` products read-only. A later build that
-    needs to regenerate one then fails with EACCES, so repair only the existing build outputs; source
-    files and the cache store are outside this boundary.
+    needs to regenerate one then fails with EACCES. Lake may hard-link a restored output to its cache;
+    detach that read-only link before changing permissions so the shared cache remains immutable.
+    Source files and the cache store are outside this boundary.
     """
     build = cwd / ".lake" / "build"
     if not build.is_dir():
@@ -774,8 +775,22 @@ def make_lake_build_outputs_writable(cwd: Path) -> int:
             if path.is_symlink():
                 continue
             try:
-                mode = path.stat().st_mode
-                if not mode & 0o200:
+                info = path.stat()
+                mode = info.st_mode
+                if info.st_nlink > 1 and not mode & 0o200:
+                    fd, temporary = tempfile.mkstemp(dir=path.parent)
+                    os.close(fd)
+                    try:
+                        shutil.copy2(path, temporary)
+                        os.chmod(temporary, mode | 0o200)
+                        os.replace(temporary, path)
+                    finally:
+                        try:
+                            os.unlink(temporary)
+                        except FileNotFoundError:
+                            pass
+                    changed += 1
+                elif not mode & 0o200:
                     path.chmod(mode | 0o200)
                     changed += 1
             except OSError as exc:
@@ -800,6 +815,8 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
         log(f"lake artifacts: made {changed} restored build output(s) writable")
     argv, env = host_agent_argv(prompt, profile)
     env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch), TAUCETI_ROUND_SCRATCH=str(scratch))
+    if not os.environ.get("TAUCETI_AGENT_ECHO"):
+        env.update(prepare_host_lake_cache(cwd, scratch))
     if os.environ.get("TAUCETI_AGENT_ECHO"):
         print(f"HOST cwd={cwd}\n  " + " ".join(_shq(a) for a in argv))
         return 0
@@ -1068,6 +1085,48 @@ TAUCETI_CACHE_DOMAIN = "cache.taucetiproject.org"
 TAUCETI_CACHE_SERVICE = "tauceti-public"
 TAUCETI_CACHE_ARTIFACT_URL = f"https://{TAUCETI_CACHE_DOMAIN}/artifacts"
 TAUCETI_CACHE_REVISION_URL = f"https://{TAUCETI_CACHE_DOMAIN}/revisions"
+
+
+def prepare_host_lake_cache(cwd: Path, scratch: Path) -> dict[str, str]:
+    """Restore TauCeti's public Lake outputs before a host agent starts.
+
+    Bubble supplies this bootstrap itself, but host rounds previously ran only the Mathlib cache
+    command from their prompts and silently rebuilt the whole TauCeti tree.  Keep the config
+    round-local and make a cache failure visible without blocking the agent's repair work.
+    """
+    config = scratch / "lake-cache.toml"
+    config.write_text(
+        'cache.defaultService = "tauceti-public"\n'
+        "[[cache.service]]\n"
+        'name = "tauceti-public"\n'
+        'kind = "s3"\n'
+        f'artifactEndpoint = "{TAUCETI_CACHE_ARTIFACT_URL}"\n'
+        f'revisionEndpoint = "{TAUCETI_CACHE_REVISION_URL}"\n'
+    )
+    env = {
+        "LAKE_CONFIG": str(config),
+        "LAKE_ARTIFACT_CACHE": "true",
+        "LAKE_RESTORE_ARTIFACTS": "true",
+    }
+    logf = scratch / "lake-cache.log"
+    try:
+        with logf.open("w") as stream:
+            result = subprocess.run(
+                ["lake", "cache", "get", "--service", TAUCETI_CACHE_SERVICE, "--repo", TAUCETI],
+                cwd=cwd,
+                env={**os.environ, **env},
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                timeout=600,
+                check=False,
+            )
+        if result.returncode:
+            log(f"warning: TauCeti Lake cache restore exited {result.returncode}; see {logf}")
+        else:
+            log(f"TauCeti Lake cache restored; see {logf}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"warning: TauCeti Lake cache restore unavailable ({exc}); see {logf}")
+    return env
 
 
 def bubble_cmd() -> list[str]:
@@ -1509,7 +1568,12 @@ def bubble_work_cmd(inner: str) -> str:
         "fi; "
         "fi; "
         'rm -f "$tc_log"; '
-        "if [ -d .lake/build ]; then find .lake/build -type f -exec chmod u+w {} +; fi; "
+        "if [ -d .lake/build ]; then "
+        "find .lake/build -type f ! -perm -u+w -exec sh -c "
+        '\'for path do tmp="$path.tauceti-copy.$$"; '
+        'cp "$path" "$tmp" && chmod u+w "$tmp" && mv "$tmp" "$path"; '
+        "done' sh {} +; "
+        "fi; "
         "if ! timeout 1800 lake build; then "
         "echo 'warning: pre-agent lake build failed or timed out; the agent starts from a red tree' >&2; "
         "fi; "
