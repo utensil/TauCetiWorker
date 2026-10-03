@@ -587,6 +587,13 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
             f"nothing actionable on the requested PR(s) {', '.join(f'#{n}' for n in opts.prs)} this "
             f"round ({scope}) — see the per-PR reasons above; no unrelated work was done"
         )
+    # A focused progress worker otherwise throws away the survey's useful suppression reason here
+    # and the manager can only display the generic fallback below. Keep unrestricted auto mode quiet:
+    # progress is commonly not due there and roadmap/review contention can legitimately fall through.
+    if opts.only and "progress" in opts.only and sv.progress.suppressed:
+        reason = sv.progress.suppressed[0].reason
+        if reason:
+            raise NoProgress(f"progress: {reason}")
     raise NoProgress(f"no eligible work this round under {scope}")
 
 
@@ -596,12 +603,12 @@ def run_round(w: Worker, opts: RoundOpts) -> int:
 # TAUCETI, and a progress round's PR lands in TauCetiRoadmap, so the guard would report "nothing
 # landed" on every successful report. Its postcondition is `tauceti-progress apply`'s own exit code,
 # which already distinguishes opened / already-in-flight / already-merged.
-PROGRESS_GUARDED = {"rebase", "fix", "fix-ci", "bump", "roadmap"}
+PROGRESS_GUARDED = {"rebase", "fix", "fix-ci", "bump", "lint-repair", "roadmap"}
 
 
 # Stages whose agent edits the checkout. `review` and `progress` do not, and a bubble round works
 # inside the container, so the host checkout would say nothing about it either way.
-FILE_CHANGE_STAGES = {"rebase", "fix", "fix-ci", "bump", "roadmap"}
+FILE_CHANGE_STAGES = {"rebase", "fix", "fix-ci", "bump", "lint-repair", "roadmap"}
 _MAX_CHANGED_FILES = 25
 
 
@@ -886,7 +893,7 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
     if not _still_actionable(stage, w, sv, c):
         return None
     if needs_codex_probe:
-        # Resolve Sol/Terra before the banner and before opening the authoring checkout. The probe is
+        # Resolve Sol/Luna before the banner and before opening the authoring checkout. The probe is
         # checkout-independent and the selected profile is then consumed exactly once by either backend.
         opts.authoring_profile = resolve_codex_model_access(w.cfg, profile)
     if needs_kiro_probe:
@@ -911,6 +918,7 @@ def dispatch(stage: str, w: Worker, sv: Survey, c: Candidate, opts: RoundOpts) -
         "fix-ci": do_fix_ci,
         "rebase": do_rebase,
         "bump": do_bump,
+        "lint-repair": do_lint_repair,
         "progress": do_progress,
         "roadmap": do_roadmap,
     }[stage]
@@ -1493,6 +1501,17 @@ def do_bump(w, sv, c, opts, bubble) -> int | None:
     return _do_fixlike(w, sv, c, opts, bubble, prompt_file="bump.md", label="bump", charged=keys)
 
 
+def do_lint_repair(w, sv, c, opts, bubble) -> int | None:
+    """Green a red lint-repair PR (TauCeti's daily full lint found violations on main that PR builds
+    could not see). Same shape as a bump: claim the branch, check the PR out, drive the agent on
+    prompts/lint-repair.md to fix TauCeti/ until the PR's full lint passes."""
+    pr, head = c.pr, c.head
+    keys = (f"lint-repair-{pr}-{head[:12]}", f"lint-repair-pr-{pr}")  # counted up front, as for bump
+    for key in keys:
+        w.counters.incr(key)
+    return _do_fixlike(w, sv, c, opts, bubble, prompt_file="lint-repair.md", label="lint-repair", charged=keys)
+
+
 def do_progress(w, sv, c, opts, bubble) -> int | None:
     """Write the per-roadmap progress report: STATUS.md + PROGRESS.md, as a PR to TauCetiRoadmap.
 
@@ -1627,6 +1646,11 @@ def _do_progress_inner(w, opts) -> int | None:
     # so without this a run that dies (or whose PR is later rejected) looks due again on the very next
     # round, for ever.
     w.counters.write("progress-attempt-ts", int(time.time()))
+    # Consume the survey's cached verdict as soon as this worker commits to the attempt. In particular,
+    # a failure must not leave a cached `due=true` ahead of the attempt-gap/error checks in
+    # progress_due(): that used to launch the same broken plan every few minutes until all three error
+    # slots were spent. The next survey now observes the durable attempt timestamp and waits eight hours.
+    bust_progress_cache(w.cfg)
 
     # A writable clone with a real `origin/main`, not the depth-1 throwaway mirror `fetch_ref` makes:
     # `apply` branches from origin/main and pushes. The roadmap repo is small, so a full clone is cheap.
