@@ -754,6 +754,32 @@ def host_agent_argv(prompt: str, profile: AuthoringProfile | str) -> tuple[list[
     return argv, env
 
 
+def make_lake_build_outputs_writable(cwd: Path) -> int:
+    """Make restored Lake products replaceable before a host build reuses them.
+
+    Lake's artifact restore can materialize `.ilean`/`.olean` products read-only. A later build that
+    needs to regenerate one then fails with EACCES, so repair only the existing build outputs; source
+    files and the cache store are outside this boundary.
+    """
+    build = cwd / ".lake" / "build"
+    if not build.is_dir():
+        return 0
+    changed = 0
+    for root, _dirs, files in os.walk(build):
+        for name in files:
+            path = Path(root) / name
+            if path.is_symlink():
+                continue
+            try:
+                mode = path.stat().st_mode
+                if not mode & 0o200:
+                    path.chmod(mode | 0o200)
+                    changed += 1
+            except OSError as exc:
+                log(f"lake artifact permission repair failed for {path}: {exc}")
+    return changed
+
+
 def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logdir: Path) -> int:
     profile = _authoring_profile(profile)
     # Keep scratch evidence alongside this worker's logs for interrupted-round recovery.
@@ -766,6 +792,9 @@ def run_agent_host(cwd: Path, prompt: str, profile: AuthoringProfile | str, logd
         "Do not use fixed shared /tmp paths. Create distinct files inside this directory; "
         "publish only this round's body and verify its target against your acquired claim.\n"
     )
+    changed = make_lake_build_outputs_writable(cwd)
+    if changed:
+        log(f"lake artifacts: made {changed} restored build output(s) writable")
     argv, env = host_agent_argv(prompt, profile)
     env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch), TAUCETI_ROUND_SCRATCH=str(scratch))
     if os.environ.get("TAUCETI_AGENT_ECHO"):
@@ -1477,6 +1506,7 @@ def bubble_work_cmd(inner: str) -> str:
         "fi; "
         "fi; "
         'rm -f "$tc_log"; '
+        'if [ -d .lake/build ]; then find .lake/build -type f -exec chmod u+w {} +; fi; '
         "if ! timeout 1800 lake build; then "
         "echo 'warning: pre-agent lake build failed or timed out; the agent starts from a red tree' >&2; "
         "fi; "
