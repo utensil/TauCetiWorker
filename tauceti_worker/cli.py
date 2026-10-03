@@ -72,7 +72,7 @@ from .github import GitHub, shared_claims_granted
 from .loop import cmd_loop, resolve_work_model
 from .paths import HERE, ensure_ssl_cert_file
 from .quota import Quota, _claude_keychain_creds, _safe_exists, claude_dir, codex_dir, parse_pace_curve
-from .review_scope import ReviewAuthorSpecError, normalize_review_author_specs, sample_review_authors
+from .review_scope import ReviewAuthorSpecError, author_logins, normalize_review_author_specs
 from .review_state import ReviewState
 from .round import Claims, RoundContext, cmd_heartbeat
 from .runtime_status import report_failure
@@ -870,13 +870,8 @@ def resolve_max_open_prs(args) -> int:
 
 def cmd_status(args) -> int:
     review_scope_roadmaps, review_scope_prs, review_scope_author_specs = parse_review_scope(args)
-    review_scope_authors, author_seed = sample_review_authors(review_scope_author_specs)
+    review_scope_authors = list(author_logins(review_scope_author_specs))
     review_scope_requested = bool(review_scope_roadmaps or review_scope_prs or review_scope_author_specs)
-    if review_scope_author_specs:
-        log(
-            f"review author sample: seed={author_seed}; configured={','.join(review_scope_author_specs)}; "
-            f"allowed={','.join(review_scope_authors) or 'none'}"
-        )
     cfg = Config.resolve(getattr(args, "worker_id", None))
     gh = GitHub()
     rs = ReviewState(cfg, gh)
@@ -1050,13 +1045,8 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool, prs: tuple[i
             review_scope_authors=review_scope_authors,
         )
     review_scope_author_specs = review_scope_authors
-    review_scope_authors, author_seed = sample_review_authors(review_scope_author_specs)
+    review_scope_authors = list(author_logins(review_scope_author_specs))
     review_scope_requested = bool(review_scope_roadmaps or review_scope_prs or review_scope_author_specs)
-    if review_scope_author_specs:
-        log(
-            f"review author sample: seed={author_seed}; configured={','.join(review_scope_author_specs)}; "
-            f"allowed={','.join(review_scope_authors) or 'none'}"
-        )
     dry = getattr(args, "dry_run", False)
     ignore_quota = getattr(args, "ignore_quota", False)
     quota_cmd = getattr(args, "quota_cmd", None)
@@ -1113,6 +1103,7 @@ def cmd_work(args, *, only: list[str], agent: str, one_round: bool, prs: tuple[i
             review_scope_roadmaps=review_scope_roadmaps,
             review_scope_prs=review_scope_prs,
             review_scope_authors=review_scope_authors,
+            review_scope_author_specs=review_scope_author_specs,
             review_scope_requested=review_scope_requested,
             tend_scope=tend_scope,
             max_open_prs=max_open_prs,

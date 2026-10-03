@@ -50,11 +50,51 @@ def normalize_review_author_specs(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(token(item) for item in sorted(by_login.items()))
 
 
-def sample_review_authors(specs: Iterable[str], *, timestamp: int | None = None) -> tuple[list[str], int | None]:
-    """Compute this round's ordinary allowed-author array from normalized specifications.
+def author_logins(specs: Iterable[str]) -> tuple[str, ...]:
+    """Return the normalized logins in an author-scope specification."""
+    return tuple(
+        login for login, _ in (_parse_review_author_spec(spec) for spec in normalize_review_author_specs(specs))
+    )
 
-    The timestamp is the random seed and is returned for observable/reproducible logs. Entries with
-    the default probability 1.0 are always present; all other decisions are independent draws.
+
+def select_review_authors(
+    specs: Iterable[str], eligible_authors: Iterable[str], *, timestamp: int | None = None
+) -> tuple[list[str], int | None]:
+    """Select eligible author scope using priority authors and relative probability weights.
+
+    A probability-1 author is a priority author: if any such author has actionable review work,
+    all eligible priority authors are selected. Otherwise one eligible author with a positive
+    probability is selected, with each author's chance proportional to its configured value. This
+    makes probabilities useful for choosing among available work instead of accidentally filtering
+    every peer out before eligibility is known.
+    """
+    normalized = normalize_review_author_specs(specs)
+    seed = time.time_ns() if timestamp is None else timestamp
+    if not normalized:
+        return [], seed
+    rng = random.Random(seed)
+    eligible = {author.casefold() for author in eligible_authors}
+    parsed = [_parse_review_author_spec(spec) for spec in normalized]
+    priority = [login for login, probability in parsed if probability == 1 and login in eligible]
+    if priority:
+        return priority, seed
+    weighted = [(login, probability) for login, probability in parsed if probability > 0 and login in eligible]
+    if not weighted:
+        return [], seed
+    total = sum((probability for _, probability in weighted), start=Decimal(0))
+    draw = rng.random() * float(total)
+    for login, probability in weighted:
+        draw -= float(probability)
+        if draw < 0:
+            return [login], seed
+    return [weighted[-1][0]], seed
+
+
+def sample_review_authors(specs: Iterable[str], *, timestamp: int | None = None) -> tuple[list[str], int | None]:
+    """Compatibility helper for callers that still need independent author draws.
+
+    Review loops use :func:`select_review_authors`, which selects from eligible authors after the
+    survey. This helper preserves the historical stateless sampling behavior for external callers.
     """
     normalized = normalize_review_author_specs(specs)
     if not normalized:

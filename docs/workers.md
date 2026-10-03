@@ -109,7 +109,7 @@ other top-level key is an error, as is any unrecognized field inside a
 | `roadmap_extra_identities` | string list | `[]` | Extra GitHub logins whose claimed intentions count as this worker's own |
 | `review_roadmap` | string list | `[]` | Roadmap labels admitted to review, forwarded only as `--review-roadmap` CLI arguments |
 | `review_pr` | positive integer list | `[]` | Explicit PRs admitted to review, unioned with `review_roadmap` and forwarded only as `--review-pr` CLI arguments |
-| `review_author` | string list | `[]` | GitHub authors as `login` or `login:decimal-probability` (default `1.0`), sampled once per round and then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
+| `review_author` | string list | `[]` | GitHub authors as `login` or `login:decimal-probability` (default `1.0`); after all configured authors are surveyed, probability-1 authors take precedence and otherwise one eligible author is selected proportionally to its probability, then unioned with `review_roadmap` and `review_pr`; forwarded only as `--review-author` CLI arguments |
 | `tend_scope` | string | `"author"` | Maintenance PR scope: `author` preserves legacy author-wide tending; `owned` tends only PR numbers recorded for this worker id |
 | `max_open_prs` | positive integer | `8` | Roadmap authoring backpressure for this worker only; changing it does not affect other workers |
 | `respect_claims` | bool | `true` | Whether to avoid intentions others have claimed |
@@ -147,8 +147,10 @@ them into environment variables or mutable worker state. Put a private
 private.
 
 Author probabilities are decimal values from `0.0` through `1.0`, not
-percentages. Each round uses a timestamp seed to compute the final allowed-author
-array before the existing roadmap OR explicit-PR OR author union is applied.
+percentages. A review-only round surveys every configured author, gives eligible
+probability-1 authors precedence, and otherwise selects one eligible author with
+probability proportional to its configured value. Explicit PR and roadmap scopes
+remain unconditional members of the union.
 
 ### Owned maintenance scope
 

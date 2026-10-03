@@ -229,6 +229,36 @@ check(
 check(
     "probability zero produces an empty final author array", tc.sample_review_authors(["never:0"], timestamp=1), ([], 1)
 )
+check(
+    "author scope separates logins from selection weights",
+    tc.author_logins(["utensil", "peer:0.5"]),
+    ("peer", "utensil"),
+)
+check(
+    "eligible priority author wins over peers",
+    tc.select_review_authors(["utensil", "peer:0.5"], ["peer", "utensil"], timestamp=0),
+    (["utensil"], 0),
+)
+check(
+    "eligible peer selection uses relative probability",
+    tc.select_review_authors(["peer-a:0.1", "peer-b:0.5"], ["peer-a", "peer-b"], timestamp=0),
+    (["peer-b"], 0),
+)
+check(
+    "eligible peer selection never returns an empty set",
+    tc.select_review_authors(["peer-a:0.1", "peer-b:0.5"], ["peer-a", "peer-b"], timestamp=1),
+    (["peer-a"], 1),
+)
+check(
+    "ineligible peers do not affect weighted selection",
+    tc.select_review_authors(["peer-a:0.1", "peer-b:0.5"], ["peer-b"], timestamp=0),
+    (["peer-b"], 0),
+)
+check(
+    "zero-weight peers remain ineligible",
+    tc.select_review_authors(["never:0"], ["never"], timestamp=0),
+    ([], 0),
+)
 
 
 def raw_pr(number, *, state="OPEN", labels=(), body="", green=True, author="someone"):
@@ -345,6 +375,60 @@ try:
     check("author scope hydrates only matching authors", [n for n, _ in gh.view_calls], [6])
     check("author scope candidate set", [c.pr for c in sv.reviewable.actionable], [6])
     check("author scope strategy is observable", sv.review_query_strategy, "scope-union")
+
+    gh = FakeGH(index=[raw_pr(6, author="Contributor-A")], views={6: raw_pr(6, author="Contributor-A")})
+    sv = survey_module.survey(
+        SimpleNamespace(wid="test"),
+        gh,
+        None,
+        FakeCounters(),
+        deep=False,
+        review_scope_authors=["contributor-a:0.3"],
+        scoped_review_only=True,
+    )
+    check("author scope index strips selection weights", [n for n, _ in gh.view_calls], [6])
+
+    sv = tc.Survey(worker_id="test")
+    sv.open_prs = [
+        tc.PRInfo.from_json(raw_pr(10, author="utensil")),
+        tc.PRInfo.from_json(raw_pr(11, author="peer-a")),
+        tc.PRInfo.from_json(raw_pr(12, author="peer-b")),
+    ]
+    sv.reviewable.actionable = [tc.Candidate(10, "head10"), tc.Candidate(11, "head11"), tc.Candidate(12, "head12")]
+    opts = tc.RoundOpts(
+        only=["review"],
+        agent="codex",
+        work_model="codex",
+        sandbox_host=True,
+        dry_run=True,
+        review_scope_authors=["peer-a", "peer-b", "utensil"],
+        review_scope_author_specs=["peer-a:0.1", "peer-b:0.5", "utensil"],
+    )
+    tc.select_scoped_review_candidates(sv, opts)
+    check("priority author excludes peers when own work is eligible", [c.pr for c in sv.reviewable.actionable], [10])
+
+    sv = tc.Survey(worker_id="test")
+    sv.open_prs = [
+        tc.PRInfo.from_json(raw_pr(11, author="peer-a")),
+        tc.PRInfo.from_json(raw_pr(12, author="peer-b")),
+    ]
+    sv.reviewable.actionable = [tc.Candidate(11, "head11"), tc.Candidate(12, "head12")]
+    tc.select_scoped_review_candidates(sv, opts)
+    check(
+        "weighted peer fallback retains eligible work",
+        len(sv.reviewable.actionable) == 1 and sv.reviewable.actionable[0].pr in {11, 12},
+        True,
+    )
+
+    sv = tc.Survey(worker_id="test")
+    sv.open_prs = [
+        tc.PRInfo.from_json(raw_pr(10, author="utensil")),
+        tc.PRInfo.from_json(raw_pr(11, author="peer-a", labels=("roadmap/Explicit",))),
+    ]
+    sv.reviewable.actionable = [tc.Candidate(10, "head10"), tc.Candidate(11, "head11")]
+    opts.review_scope_roadmaps = ["Explicit"]
+    tc.select_scoped_review_candidates(sv, opts)
+    check("explicit roadmap work remains in the union", [c.pr for c in sv.reviewable.actionable], [11, 10])
 
     gh = FakeGH(index=[raw_pr(6, author="Contributor-A")], views={6: raw_pr(6, author="Contributor-A")})
     sv = survey_module.survey(
