@@ -325,9 +325,30 @@ clears this private store while no agent is
 running. Switching between PR branches does not count as a bump and therefore
 does not churn the cache.
 
+That private store can still be pooled, which is worth doing because four fronts
+carrying the same toolchain hold four copies of the same artifacts. It is
+**opt-in**: set `TAUCETI_LAKE_POOL` to a pool root, and before each round the
+worker exchanges *sealed* artifacts with `<root>/<toolchain digest>/` exactly the
+way Mathlib's `.ltar`s are exchanged. Two constraints come from the store being
+written during builds rather than once at install:
+
+  * only the content-addressed `artifacts/` subtree is exchanged. `outputs/` and
+    `revisions/` are indexes Lake rewrites in place, and a hardlink shares its
+    inode, so pooling one would let a write through one worker's path reach
+    every holder of the link;
+  * only files Lake has already sealed read-only are pooled, so a name that is
+    still being written can never become the pool's version of it.
+
+The pool is partitioned by the checkout's `lean-toolchain` digest, so the bump
+above cannot clear a worker's store while the pool hands the dropped generation
+straight back. Pooling only ever ADDS names on both sides and never redefines
+one, so a worker that cannot reach the pool simply keeps its own copy.
+
 Setting any of the three yourself overrides this. `scripts/share-build-caches`
 folds the private copies an already-running fleet accumulated into the pool
-without re-downloading them.
+without re-downloading them; its report and `--link` stages are safe alongside a
+live fleet, while its `--prune` stage (which stops being name-based and compares
+bytes per file) requires stopping the fleet first.
 
 On macOS, `$HOME` stays unchanged because both Claude Code and GitHub CLI use the
 login Keychain. `tauceti` redirects `$CLAUDE_CONFIG_DIR` and `$CODEX_HOME`, which

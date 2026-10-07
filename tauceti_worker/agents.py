@@ -471,6 +471,43 @@ def sync_mathlib_pool(cfg: Config) -> None:
         log(f"mathlib cache pool: promoted {promoted}, hydrated {hydrated} ({pool})")
 
 
+def sync_lake_pool(cfg: Config) -> None:
+    """Exchange sealed Lake artifacts with the machine pool before the agent runs.
+
+    Off unless ``TAUCETI_LAKE_POOL`` names a pool root. Unlike the `.ltar` pool there is no directory
+    the operator's own tooling already fills, and this store is written throughout a build rather than
+    once at install, so pooling it is an explicit per-lane decision rather than a default.
+
+    The store is partitioned by toolchain generation, because ``clean_lake_cache_after_toolchain_bump``
+    deliberately clears this worker's owned copy on a bump and a flat pool would hand the previous
+    generation straight back. A checkout with no readable pin is left alone rather than pooled
+    unpartitioned.
+
+    Only ``artifacts/`` is exchanged, and only files Lake has sealed read-only, so a half-written name
+    can never become the pool's version of it. Both directions only ADD names, so this is safe to run
+    while other workers sync; it must run before the agent starts, since this worker's own store is
+    only quiescent until then. Best effort — a worker that cannot reach the pool keeps its own copy.
+    """
+    generation, _ = toolchain_generation(cfg)
+    if not generation:
+        return
+    pool = build_caches.lake_pool(_host_home(), generation)
+    if pool is None:
+        return
+    private = Path(os.environ.get("LAKE_CACHE_DIR") or (cfg.data_home / ".cache" / "lake"))
+    if private.resolve() == pool.resolve():
+        return  # operator pointed this worker straight at the pool; nothing to exchange
+    try:
+        promoted, hydrated = build_caches.sync_pool(
+            private, pool, skip=build_caches.lake_mutable, accept=build_caches.lake_sealed
+        )
+    except OSError as e:
+        log(f"lake artifact pool: skipped ({e})")
+        return
+    if promoted or hydrated:
+        log(f"lake artifact pool: promoted {promoted}, hydrated {hydrated} ({pool})")
+
+
 def continuation_checkout(
     cfg: Config,
     branch: str,
@@ -530,6 +567,23 @@ def continuation_checkout(
         return None
 
 
+def toolchain_generation(cfg: Config) -> tuple[str, str]:
+    """Canonical main's toolchain digest and label, or ("", "") when it cannot be read.
+
+    One generation boundary for both Lake policies: the owned-store cleanup below and the artifact
+    pool (`sync_lake_pool`) must agree on what "the current toolchain" is, or a bump could clear the
+    worker's store while the pool kept serving the generation that bump just dropped.
+    """
+    import hashlib
+
+    try:
+        contents = (cfg.checkout / "lean-toolchain").read_bytes()
+    except OSError:
+        return ("", "")
+    label = next((line.strip() for line in contents.decode(errors="replace").splitlines() if line.strip()), "empty")
+    return (hashlib.sha256(contents).hexdigest(), label[:160])
+
+
 def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
     """Drop this worker's owned Lake artifact store when canonical main changes toolchains.
 
@@ -541,16 +595,9 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
     Only the default per-worker path is ours to delete.  An explicit ``LAKE_CACHE_DIR`` can name an
     operator-managed or shared store, and is therefore reported but left untouched.
     """
-    import hashlib
-
-    toolchain_file = cfg.checkout / "lean-toolchain"
-    try:
-        contents = toolchain_file.read_bytes()
-    except OSError:
+    digest, label = toolchain_generation(cfg)
+    if not digest:
         return
-    digest = hashlib.sha256(contents).hexdigest()
-    label = next((line.strip() for line in contents.decode(errors="replace").splitlines() if line.strip()), "empty")
-    label = label[:160]
 
     marker = cfg.state / "cache" / "lake-cache-toolchain.json"
     previous = _read_json_file(marker)
@@ -597,6 +644,7 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
 def prepare_checkout(cfg: Config) -> bool:
     """Clean checkout of TauCeti main; retain ignored build artifacts for a later continuation."""
     sync_mathlib_pool(cfg)
+    sync_lake_pool(cfg)
     co = cfg.checkout
     if not (co / ".git").is_dir():
         co.parent.mkdir(parents=True, exist_ok=True)

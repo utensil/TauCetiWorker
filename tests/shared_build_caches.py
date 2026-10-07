@@ -10,7 +10,9 @@ covered 6 distinct toolchains. Two different fixes, because the two caches are w
   * Mathlib's cache is NOT, because `lake exe cache get` takes no lock and older checkouts write
     fixed-name temporaries, so two workers in one directory can leave a corrupt `.ltar` under a name
     every later run trusts. It is pooled by hardlinking COMPLETE files instead, before the agent runs.
-  * Lake's own store stays per-worker: it is written throughout a build, not once at install.
+  * Lake's own store stays per-worker: it is written throughout a build, not once at install. Its
+    *sealed* artifacts are pooled separately — opt-in (`TAUCETI_LAKE_POOL`) and partitioned by
+    toolchain generation; see tests/lake_artifact_pool.py.
 
 These assertions pin that split, the sentinel path a round child takes, and the pool exchange itself
 (promote then hydrate, transient files never pooled, an existing name never redefined).
