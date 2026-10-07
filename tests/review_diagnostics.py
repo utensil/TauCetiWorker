@@ -83,6 +83,28 @@ with tempfile.TemporaryDirectory() as raw:
     check("missing log preserves reason", failure_summary(state / "missing", "Not logged in"), "Not logged in")
 
     generic = "tauceti-review: command failed (1): python runner/review.py"
+    warnings = (
+        "tauceti-review: WARNING: rubrics differ from published main; review continues\n"
+        "\x1b[33mtauceti-review: WARNING: rubrics commit is not on GitHub\x1b[0m\n"
+    )
+    log.write_text(warnings + generic + "\n")
+    check("rubric warnings do not hide terminal failure", failure_summary(log), generic)
+    log.write_text(
+        warnings + "$ python runner/post.py\ngh: Resource not accessible by integration (HTTP 403)\n" + generic + "\n"
+    )
+    value = record_review_failure(state, worker="w", pr=47, head="a" * 40, provider="codex", code=1, log_file=log)
+    check(
+        "failure after rubric warnings keeps permission diagnosis",
+        "lack of permission" in public_review_failure(value),
+        True,
+    )
+    log.write_text("tauceti-review: WARNING: unknown model mentioned in advisory text\n")
+    check("warning alone is not a failure diagnosis", failure_summary(log), "")
+    check(
+        "warning alone preserves caller failure",
+        failure_summary(log, "review exited with status 1"),
+        "review exited with status 1",
+    )
     for prefix in (
         "$ git clone -q https://github.com/TauCetiProject/TauCeti /tmp/code\n",
         "git clone completed successfully\n",
