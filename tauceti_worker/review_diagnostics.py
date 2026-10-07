@@ -208,6 +208,10 @@ def failure_summary(log_file: Path | None, reason: str = "") -> str:
     in_review_text = False
     for raw in lines:
         line = _ANSI_RE.sub("", raw).strip()
+        # Rubric drift/publication warnings are advisory; the CLI continues to
+        # run and may report the actual failure later.
+        if line.startswith("tauceti-review: WARNING:"):
+            continue
         # stdout (review prose) can flush around stderr (the command and its
         # error). A new subprocess echo ends the prose phase, and die() is the
         # parent's final stderr write: anything later is buffered review text.
