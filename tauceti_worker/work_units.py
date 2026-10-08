@@ -35,6 +35,7 @@ from .agents import (
     run_agent_host,
     run_in_bubble,
     run_to_logfile,
+    sync_lake_pool,
     take_last_agent_infra_failure,
     validate_kiro_model_access,
     wrapper_bin,
@@ -1428,6 +1429,11 @@ def _do_fixlike(
             log(f"checkout failed for #{pr} — skipping this attempt")
             report_failure(f"{label} #{pr}: checkout preparation failed", code=1)
             return 1
+        if reuse:
+            # prepare_checkout performs this at the same quiescent boundary for fresh work. A
+            # continuation deliberately skips checkout, so exchange its sealed artifacts here,
+            # after the previous agent has exited and before the next one can write the store.
+            sync_lake_pool(w.cfg)
         co = w.cfg.checkout
         # Capture the checkout's git chatter ("Switched to a new branch …", "set up to track …") instead
         # of letting it spill into the main log; surface a one-line summary, and the stderr only on failure.

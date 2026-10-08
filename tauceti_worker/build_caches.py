@@ -18,8 +18,9 @@ Lake's artifact store is therefore pooled the way Mathlib's is — hardlinks of 
 shared writable directory — but more narrowly, and only when `TAUCETI_LAKE_POOL` names a pool root:
 unlike `.ltar`s there is no directory the operator's own tooling already fills, so pooling it stays an
 explicit per-lane decision. Only the content-addressed `artifacts/` subtree qualifies, only files Lake
-has already sealed read-only, and the pool is partitioned by toolchain generation, because a toolchain
+has already left read-only, and the pool is partitioned by toolchain generation, because a toolchain
 bump deliberately clears this worker's store and re-hydrating the previous generation would undo it.
+Completed bulk downloads that remain writable are conservatively excluded rather than chmodded.
 
 Mathlib's `.ltar` cache is NOT pooled by pointing workers at one directory, which was this module's
 first design and was wrong. `lake exe cache get` takes no lock, and until every checkout runs a
@@ -188,10 +189,10 @@ def lake_pool(host_home: Path, generation: str = "", env: dict[str, str] | None 
     """Where the machine keeps its shared Lake artifacts, or None when pooling is not switched on.
 
     `TAUCETI_LAKE_POOL` names a pool ROOT rather than one directory, because the store is partitioned
-    by *generation* — normally the digest of the canonical-main toolchain. `clean_lake_cache_after_
+    by *generation* — the digest recorded from the canonical-main toolchain. `clean_lake_cache_after_
     toolchain_bump` deliberately clears this worker's owned store when that toolchain changes; a
     single flat pool would immediately re-hydrate the previous generation's artifacts and undo the
-    cleanup, and would keep every generation's bytes forever.
+    cleanup. Partitioning does not prune old generations; that remains an operator decision.
 
     Unlike `mathlib_pool` there is no fallback: nothing an operator's interactive tooling already
     fills, and a store this writable must not be pooled by accident."""
@@ -212,12 +213,12 @@ def lake_mutable(rel: Path) -> bool:
 
 
 def lake_sealed(path: Path) -> bool:
-    """Has Lake finished writing this artifact? `walk`'s accept hook for the Lake store.
+    """Is this artifact read-only? `walk`'s conservative accept hook for the Lake store.
 
-    Lake installs an artifact and then drops its write bits, so a writable name is either still being
-    written or a crash's leftover. Pooling one would promote it to the pool's version of that name
-    for every worker, which is the same unrecoverable-by-design failure the `.ltar` pool refuses: the
-    name is one the store trusts forever, and `link_into` never redefines a name it already holds."""
+    Writable names are excluded even though Lake's bulk cache-get path can leave completed downloads
+    writable. Pooling does not chmod them or infer completion from their names: read-only is the only
+    seal established here before a name can become the pool's version for every worker, and
+    `link_into` deliberately never redefines a name the pool already holds."""
     if path.is_symlink() or not path.is_file():
         return False
     try:

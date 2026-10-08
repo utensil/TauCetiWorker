@@ -8,31 +8,35 @@ cache is — a hardlink farm that only ever gains COMPLETE files — but with tw
 
   * the pool is an explicit opt-in (`TAUCETI_LAKE_POOL`), since there is no operator directory to
     adopt and a writable store must not be pooled by accident;
-  * it is partitioned by toolchain generation, because `clean_lake_cache_after_toolchain_bump`
-    deliberately clears this worker's owned store on a bump, and a flat pool would hand the dropped
-    generation straight back and keep every generation's bytes forever.
+  * it is partitioned by the recorded canonical-main toolchain generation, because
+    `clean_lake_cache_after_toolchain_bump` deliberately clears this worker's owned store on a bump,
+    and a flat pool would hand the dropped generation straight back.
 
 And with a narrower notion of "complete": only the content-addressed `artifacts/` subtree is
 poolable, and only files Lake has sealed read-only. `outputs/`/`revisions/` are indexes Lake rewrites
 in place — sharing an inode with a mutable file is how a link corrupts every holder at once.
 
 These assertions pin the switch, the partitioning, the exchange itself, and the two ways a file is
-refused: still writable (incomplete) and outside `artifacts/` (mutable).
+refused: writable (not proven sealed, even if a bulk download completed) and outside `artifacts/`
+(mutable).
 
 Exit 0 = all assertions hold; 1 = a mismatch.
 """
 
+import hashlib
+import json
 import stat
 import sys
 import tempfile
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 import tauceti_worker as tc
-from tauceti_worker import build_caches
+from tauceti_worker import build_caches, checkout_recovery
 
 fails = 0
 LOGIN_HOME = Path("/home/pretend-operator")
@@ -92,8 +96,11 @@ def main():
             store(root)
             sealed, unsealed = root / "artifacts" / "sealed.olean", root / "artifacts" / "sealing.olean"
             unsealed.chmod(0o644)
+            symlink = root / "artifacts" / "linked.olean"
+            symlink.symlink_to(sealed)
             check("a read-only artifact counts as sealed", build_caches.lake_sealed(sealed))
             check("a writable artifact does not", not build_caches.lake_sealed(unsealed))
+            check("a symlink does not", not build_caches.lake_sealed(symlink))
             check("a directory does not", not build_caches.lake_sealed(root / "artifacts"))
 
             # --- the exchange ----------------------------------------------------------------------
@@ -102,9 +109,9 @@ def main():
                 checkout=Path(tmp) / "checkout", state=Path(tmp) / "state", data_home=Path(tmp) / "home"
             )
             config.checkout.mkdir(parents=True)
-            (config.checkout / "lean-toolchain").write_text("leanprover/lean4:v4.35.0-rc3\n")
-            generation, label = tc.agents.toolchain_generation(config)
-            check("the generation is the pin's digest", bool(generation) and label == "leanprover/lean4:v4.35.0-rc3")
+            (config.checkout / "lean-toolchain").write_text("leanprover/lean4:old-pr-pin\n")
+            canonical_pin = b"leanprover/lean4:v4.35.0-rc3\n"
+            generation = hashlib.sha256(canonical_pin).hexdigest()
 
             env.pop("TAUCETI_LAKE_POOL", None)
             env["LAKE_CACHE_DIR"] = str(root)
@@ -112,6 +119,11 @@ def main():
             check("no pool root means the store is left alone", not pool.exists())
 
             env["TAUCETI_LAKE_POOL"] = str(pool)
+            tc.agents.sync_lake_pool(config)
+            check("no canonical-main marker means no pool is created", not pool.exists())
+            marker = config.state / "cache" / "lake-cache-toolchain.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(json.dumps({"sha256": generation, "toolchain": canonical_pin.decode().strip()}))
             messages = []
             original_log = tc.agents.log
             tc.agents.log = lambda message: messages.append(str(message))
@@ -120,9 +132,12 @@ def main():
             finally:
                 tc.agents.log = original_log
             partition = pool / generation
-            check("the pool is created under the generation", partition.is_dir())
+            pr_generation = hashlib.sha256((config.checkout / "lean-toolchain").read_bytes()).hexdigest()
+            check("the pool is created under the recorded canonical generation", partition.is_dir())
+            check("the current PR pin does not select a generation", not (pool / pr_generation).exists())
             check("a sealed artifact is promoted", (partition / "artifacts" / "sealed.olean").exists())
             check("an unsealed artifact is not promoted", not (partition / "artifacts" / "sealing.olean").exists())
+            check("a symlink is not promoted", not (partition / "artifacts" / "linked.olean").exists())
             check("the mutable outputs index is never pooled", not (partition / "outputs").exists())
             check("the mutable revisions index is never pooled", not (partition / "revisions").exists())
             check("a half-written artifact is never pooled", not (partition / "artifacts" / "half.olean.part").exists())
@@ -165,17 +180,119 @@ def main():
             env["LAKE_CACHE_DIR"] = str(partition)
             tc.agents.sync_lake_pool(config)
             check(
-                "a worker pointed straight at the pool exchanges nothing",
+                "a private cache inside the configured pool root exchanges nothing",
                 sorted(p.name for p in partition.iterdir()) == ["artifacts"],
             )
 
             empty = types.SimpleNamespace(
-                checkout=Path(tmp) / "no-pin", state=Path(tmp) / "state", data_home=Path(tmp) / "home"
+                checkout=Path(tmp) / "no-pin", state=Path(tmp) / "no-marker-state", data_home=Path(tmp) / "home"
             )
             empty.checkout.mkdir()
             env.pop("LAKE_CACHE_DIR", None)
+            empty_pool = Path(tmp) / "no-marker-pool"
+            env["TAUCETI_LAKE_POOL"] = str(empty_pool)
             tc.agents.sync_lake_pool(empty)
-            check("a checkout with no readable pin is left unpooled", tc.agents.toolchain_generation(empty) == ("", ""))
+            check("a state root with no canonical marker is left unpooled", not empty_pool.exists())
+
+        # --- overlapping roots ---------------------------------------------------------------------
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            generation = "a" * 64
+            config = types.SimpleNamespace(checkout=base / "checkout", state=base / "state", data_home=base / "home")
+            marker = config.state / "cache" / "lake-cache-toolchain.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(json.dumps({"sha256": generation, "toolchain": "canonical"}))
+
+            private = store(base / "private")
+            nested_pool = private / "pool"
+            env["LAKE_CACHE_DIR"] = str(private)
+            env["TAUCETI_LAKE_POOL"] = str(nested_pool)
+            tc.agents.sync_lake_pool(config)
+            check("a pool root below the private cache is rejected before creation", not nested_pool.exists())
+
+            real_private = store(base / "real-private")
+            private_alias = base / "private-alias"
+            private_alias.symlink_to(real_private, target_is_directory=True)
+            aliased_nested_pool = real_private / "aliased-pool"
+            env["LAKE_CACHE_DIR"] = str(private_alias)
+            env["TAUCETI_LAKE_POOL"] = str(aliased_nested_pool)
+            tc.agents.sync_lake_pool(config)
+            check("resolved private aliases cannot hide a nested pool", not aliased_nested_pool.exists())
+
+            real_pool = base / "real-pool"
+            real_pool.mkdir()
+            pool_alias = base / "pool-alias"
+            pool_alias.symlink_to(real_pool, target_is_directory=True)
+            nested_private = store(real_pool / "worker-cache")
+            env["LAKE_CACHE_DIR"] = str(nested_private)
+            env["TAUCETI_LAKE_POOL"] = str(pool_alias)
+            tc.agents.sync_lake_pool(config)
+            check("resolved pool aliases cannot hide a nested private cache", not (real_pool / generation).exists())
+
+        # --- fresh checkout, canonical bump, then exchange -----------------------------------------
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            checkout = base / "checkout"
+            (checkout / ".git").mkdir(parents=True)
+            toolchain = checkout / "lean-toolchain"
+            toolchain.write_text("leanprover/lean4:prior-pr-pin\n")
+            config = types.SimpleNamespace(checkout=checkout, state=base / "state", data_home=base / "home")
+            private = store(config.data_home / ".cache" / "lake")
+            pool = base / "pool"
+            env.pop("LAKE_CACHE_DIR", None)
+            env["TAUCETI_LAKE_POOL"] = str(pool)
+
+            canonical_pins = [b"leanprover/lean4:canonical-one\n"]
+
+            def git_run(argv, *args, **kwargs):
+                if "checkout" in argv:
+                    toolchain.write_bytes(canonical_pins[0])
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                patch.object(tc.agents, "sync_mathlib_pool"),
+                patch.object(tc.agents.subprocess, "run", side_effect=git_run),
+                patch.object(checkout_recovery, "preserve_before_checkout"),
+            ):
+                check("fresh host preparation succeeds", tc.agents.prepare_checkout(config))
+                first_generation = hashlib.sha256(canonical_pins[0]).hexdigest()
+                first_partition = pool / first_generation
+                check("fresh preparation records canonical main before pooling", first_partition.is_dir())
+                check("fresh preparation preserves and promotes the established cache", private.exists())
+                check(
+                    "fresh preparation promotes sealed artifacts", (first_partition / "artifacts/sealed.olean").exists()
+                )
+
+                old_only = private / "artifacts/old-only.olean"
+                old_only.write_bytes(b"old generation")
+                old_only.chmod(0o444)
+                canonical_pins[0] = b"leanprover/lean4:canonical-two\n"
+                second_generation = hashlib.sha256(canonical_pins[0]).hexdigest()
+                second_artifacts = pool / second_generation / "artifacts"
+                second_artifacts.mkdir(parents=True)
+                new_only = second_artifacts / "new-only.olean"
+                new_only.write_bytes(b"new generation")
+                new_only.chmod(0o444)
+
+                check("host preparation after a canonical bump succeeds", tc.agents.prepare_checkout(config))
+                check(
+                    "the bumped private store is hydrated from the new generation",
+                    (private / "artifacts/new-only.olean").exists(),
+                )
+                check(
+                    "old private artifacts are not promoted into the new generation",
+                    not (second_artifacts / "old-only.olean").exists(),
+                )
+                check("the old generation is retained rather than implicitly pruned", first_partition.exists())
+                recorded = json.loads((config.state / "cache/lake-cache-toolchain.json").read_text())
+                check("the bump marker advances before synchronization", recorded.get("sha256") == second_generation)
+
+                canonical_pins[0] = b"leanprover/lean4:canonical-three\n"
+                with patch.object(tc.agents, "_write_json_atomic", side_effect=OSError("marker unavailable")):
+                    check("checkout preparation survives a marker-write failure", tc.agents.prepare_checkout(config))
+                check("a stale marker cannot hydrate the retired generation", not private.exists())
+                recorded = json.loads((config.state / "cache/lake-cache-toolchain.json").read_text())
+                check("a failed marker update remains retryable", recorded.get("sha256") == second_generation)
     finally:
         tc.agents._host_home = orig_host_home
         tc.agents.sys.platform = saved_platform
