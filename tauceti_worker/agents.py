@@ -502,10 +502,33 @@ def sync_lake_pool(cfg: Config) -> None:
     except (OSError, RuntimeError) as e:
         log(f"lake artifact pool: skipped (could not resolve roots: {e})")
         return
+
+    def existing_root_matches_ancestor(root: Path, other: Path) -> bool:
+        try:
+            root.stat()
+        except OSError:
+            return False
+        for ancestor in (other, *other.parents):
+            try:
+                if os.path.samefile(root, ancestor):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    private_casefold = tuple(part.casefold() for part in private_resolved.parts)
+    pool_casefold = tuple(part.casefold() for part in pool_root_resolved.parts)
+    darwin_casefold_overlap = sys.platform == "darwin" and (
+        private_casefold[: len(pool_casefold)] == pool_casefold
+        or pool_casefold[: len(private_casefold)] == private_casefold
+    )
     if (
         private_resolved == pool_root_resolved
         or private_resolved in pool_root_resolved.parents
         or pool_root_resolved in private_resolved.parents
+        or existing_root_matches_ancestor(private_resolved, pool_root_resolved)
+        or existing_root_matches_ancestor(pool_root_resolved, private_resolved)
+        or darwin_casefold_overlap
     ):
         log(f"lake artifact pool: skipped (pool root and private cache overlap: {pool_root}, {private})")
         return
@@ -596,8 +619,9 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> bool:
     """
     import hashlib
 
+    toolchain_file = cfg.checkout / "lean-toolchain"
     try:
-        contents = (cfg.checkout / "lean-toolchain").read_bytes()
+        contents = toolchain_file.read_bytes()
     except OSError:
         return False
     digest = hashlib.sha256(contents).hexdigest()
@@ -694,6 +718,8 @@ def prepare_checkout(cfg: Config) -> bool:
     # Compare canonical main, rather than an arbitrary PR branch, and retire old-toolchain artifacts
     # before anything can begin writing this worker's private Lake store again.
     lake_marker_current = clean_lake_cache_after_toolchain_bump(cfg)
+    if not lake_marker_current and build_caches.lake_pool(_host_home()) is not None:
+        return False
     g("clean", "-fdq", "-e", ".lake")  # retain ignored exact-target build artifacts
     if lake_marker_current:
         sync_lake_pool(cfg)

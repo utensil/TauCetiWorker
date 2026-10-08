@@ -229,6 +229,39 @@ def main():
             tc.agents.sync_lake_pool(config)
             check("resolved pool aliases cannot hide a nested private cache", not (real_pool / generation).exists())
 
+            # Path.resolve() preserves spelling case. Model the case-insensitive filesystem identity
+            # of an existing private root while keeping the test portable to case-sensitive hosts.
+            identity_pool = base / "REAL-PRIVATE" / "identity-pool"
+            original_samefile = tc.agents.os.path.samefile
+
+            def case_insensitive_samefile(left, right):
+                pair = {Path(left), Path(right)}
+                if pair == {real_private.resolve(), identity_pool.parent}:
+                    return True
+                return original_samefile(left, right)
+
+            env["LAKE_CACHE_DIR"] = str(real_private)
+            env["TAUCETI_LAKE_POOL"] = str(identity_pool)
+            with (
+                patch.object(tc.agents.sys, "platform", "linux"),
+                patch.object(tc.agents.os.path, "samefile", side_effect=case_insensitive_samefile),
+            ):
+                tc.agents.sync_lake_pool(config)
+            check("filesystem-identical root ancestors cannot hide overlap", not identity_pool.exists())
+
+            # Neither path exists, so there is no identity to compare and no symlink to resolve.
+            # Darwin conservatively rejects a case-varied lexical nesting before creating either root.
+            cold_private = base / "Cold-Cache"
+            cold_pool = base / "cold-cache" / "pool"
+            env["LAKE_CACHE_DIR"] = str(cold_private)
+            env["TAUCETI_LAKE_POOL"] = str(cold_pool)
+            with patch.object(tc.agents.sys, "platform", "darwin"):
+                tc.agents.sync_lake_pool(config)
+            check(
+                "case-varied cold Darwin roots are rejected before creation",
+                not cold_private.exists() and not cold_pool.exists(),
+            )
+
         # --- fresh checkout, canonical bump, then exchange -----------------------------------------
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -288,11 +321,18 @@ def main():
                 check("the bump marker advances before synchronization", recorded.get("sha256") == second_generation)
 
                 canonical_pins[0] = b"leanprover/lean4:canonical-three\n"
-                with patch.object(tc.agents, "_write_json_atomic", side_effect=OSError("marker unavailable")):
-                    check("checkout preparation survives a marker-write failure", tc.agents.prepare_checkout(config))
-                check("a stale marker cannot hydrate the retired generation", not private.exists())
+                with (
+                    patch.object(tc.agents, "_write_json_atomic", side_effect=OSError("marker unavailable")),
+                    patch.object(tc.agents, "sync_lake_pool") as sync_after_failure,
+                ):
+                    check("opt-in checkout refuses a marker-write failure", not tc.agents.prepare_checkout(config))
+                check("a stale marker never reaches pooling", not sync_after_failure.called)
                 recorded = json.loads((config.state / "cache/lake-cache-toolchain.json").read_text())
                 check("a failed marker update remains retryable", recorded.get("sha256") == second_generation)
+
+                env.pop("TAUCETI_LAKE_POOL")
+                with patch.object(tc.agents, "clean_lake_cache_after_toolchain_bump", return_value=False):
+                    check("non-opt-in checkout behavior is unchanged", tc.agents.prepare_checkout(config))
     finally:
         tc.agents._host_home = orig_host_home
         tc.agents.sys.platform = saved_platform
