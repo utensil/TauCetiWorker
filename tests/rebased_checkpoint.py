@@ -63,10 +63,12 @@ with tempfile.TemporaryDirectory(prefix="rebased-checkpoint-") as tmp:
     worker.rc = SimpleNamespace()
     worker.rs = SimpleNamespace(bust=lambda pr: None)
     pr.number, pr.head_owner, pr.head_repo = 77, "test", "repo"
+    lifecycle = []
     with (
         patch.dict(os.environ),
         patch.object(wu, "_effective_authoring_profile", return_value=None),
-        patch.object(wu, "run_agent_host", return_value=0) as author,
+        patch.object(wu, "sync_lake_pool", side_effect=lambda _cfg: lifecycle.append("sync")) as sync,
+        patch.object(wu, "run_agent_host", side_effect=lambda *_args: lifecycle.append("agent") or 0) as author,
         patch.object(wu, "prepare_checkout") as prepare,
     ):
         result = wu._do_fixlike(
@@ -79,6 +81,7 @@ with tempfile.TemporaryDirectory(prefix="rebased-checkpoint-") as tmp:
             label="fix",
         )
         assert result == 0 and author.call_count == 1 and not prepare.called
+        assert sync.call_count == 1 and lifecycle == ["sync", "agent"]
         assert worker.rc.change_base_head == rebased
         assert os.environ["TAUCETI_PUSH_EXPECT"] == public
 

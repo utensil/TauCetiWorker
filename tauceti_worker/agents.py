@@ -471,6 +471,79 @@ def sync_mathlib_pool(cfg: Config) -> None:
         log(f"mathlib cache pool: promoted {promoted}, hydrated {hydrated} ({pool})")
 
 
+def sync_lake_pool(cfg: Config) -> None:
+    """Exchange sealed Lake artifacts with the machine pool before the agent runs.
+
+    Off unless ``TAUCETI_LAKE_POOL`` names a pool root. Unlike the `.ltar` pool there is no directory
+    the operator's own tooling already fills, and this store is written throughout a build rather than
+    once at install, so pooling it is an explicit per-lane decision rather than a default.
+
+    The store is partitioned by the canonical-main generation already recorded by
+    ``clean_lake_cache_after_toolchain_bump``. Reading that marker instead of the current checkout is
+    important for resumed PR branches, which may carry an older pin. With no valid marker, leave the
+    store alone rather than pool it under an unverified generation.
+
+    Only ``artifacts/`` is exchanged, and only files already read-only. Writable files — including
+    completed bulk downloads Lake may leave writable — are conservatively excluded, not chmodded.
+    Both directions only ADD names, so this is safe to run while other workers sync; it must run
+    before the agent starts, since this worker's own store is only quiescent until then. Best effort —
+    a worker that cannot reach the pool keeps its own copy.
+    """
+    marker = _read_json_file(cfg.state / "cache" / "lake-cache-toolchain.json")
+    generation = marker.get("sha256") if isinstance(marker, dict) else None
+    if not isinstance(generation, str) or re.fullmatch(r"[0-9a-f]{64}", generation) is None:
+        return
+    pool_root = build_caches.lake_pool(_host_home())
+    if pool_root is None:
+        return
+    private = Path(os.environ.get("LAKE_CACHE_DIR") or (cfg.data_home / ".cache" / "lake"))
+    try:
+        private_resolved, pool_root_resolved = private.resolve(), pool_root.resolve()
+    except (OSError, RuntimeError) as e:
+        log(f"lake artifact pool: skipped (could not resolve roots: {e})")
+        return
+
+    def existing_root_matches_ancestor(root: Path, other: Path) -> bool:
+        try:
+            root.stat()
+        except OSError:
+            return False
+        for ancestor in (other, *other.parents):
+            try:
+                if os.path.samefile(root, ancestor):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    private_casefold = tuple(part.casefold() for part in private_resolved.parts)
+    pool_casefold = tuple(part.casefold() for part in pool_root_resolved.parts)
+    darwin_casefold_overlap = sys.platform == "darwin" and (
+        private_casefold[: len(pool_casefold)] == pool_casefold
+        or pool_casefold[: len(private_casefold)] == private_casefold
+    )
+    if (
+        private_resolved == pool_root_resolved
+        or private_resolved in pool_root_resolved.parents
+        or pool_root_resolved in private_resolved.parents
+        or existing_root_matches_ancestor(private_resolved, pool_root_resolved)
+        or existing_root_matches_ancestor(pool_root_resolved, private_resolved)
+        or darwin_casefold_overlap
+    ):
+        log(f"lake artifact pool: skipped (pool root and private cache overlap: {pool_root}, {private})")
+        return
+    pool = pool_root / generation
+    try:
+        promoted, hydrated = build_caches.sync_pool(
+            private, pool, skip=build_caches.lake_mutable, accept=build_caches.lake_sealed
+        )
+    except OSError as e:
+        log(f"lake artifact pool: skipped ({e})")
+        return
+    if promoted or hydrated:
+        log(f"lake artifact pool: promoted {promoted}, hydrated {hydrated} ({pool})")
+
+
 def continuation_checkout(
     cfg: Config,
     branch: str,
@@ -530,7 +603,7 @@ def continuation_checkout(
         return None
 
 
-def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
+def clean_lake_cache_after_toolchain_bump(cfg: Config) -> bool:
     """Drop this worker's owned Lake artifact store when canonical main changes toolchains.
 
     The marker follows ``origin/main``, not the branch left by the previous round and not a PR the
@@ -540,6 +613,9 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
 
     Only the default per-worker path is ours to delete.  An explicit ``LAKE_CACHE_DIR`` can name an
     operator-managed or shared store, and is therefore reported but left untouched.
+
+    Return whether the marker now verifiably names canonical main. Callers must not pool after a
+    cleanup or marker-write failure, because the previous marker would select the retired generation.
     """
     import hashlib
 
@@ -547,7 +623,7 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
     try:
         contents = toolchain_file.read_bytes()
     except OSError:
-        return
+        return False
     digest = hashlib.sha256(contents).hexdigest()
     label = next((line.strip() for line in contents.decode(errors="replace").splitlines() if line.strip()), "empty")
     label = label[:160]
@@ -562,9 +638,10 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
             _write_json_atomic(marker, {"sha256": digest, "toolchain": label})
         except OSError as e:
             log(f"Lake artifact cache: could not record toolchain marker ({e})")
-        return
+            return False
+        return True
     if previous["sha256"] == digest:
-        return
+        return True
 
     old_label = str(previous.get("toolchain") or previous["sha256"][:12])
     owned_cache = cfg.data_home / ".cache" / "lake"
@@ -583,7 +660,7 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
         except OSError as e:
             # Do not advance the marker: retry at the next quiescent checkout preparation.
             log(f"Lake artifact cache: main toolchain changed ({old_label} → {label}), but cleanup failed ({e})")
-            return
+            return False
         result = f"cleared {configured_cache}" if had_cache else "cache already empty"
         log(f"Lake artifact cache: main toolchain changed ({old_label} → {label}); {result}")
 
@@ -592,6 +669,8 @@ def clean_lake_cache_after_toolchain_bump(cfg: Config) -> None:
         _write_json_atomic(marker, {"sha256": digest, "toolchain": label})
     except OSError as e:
         log(f"Lake artifact cache: cleanup completed but could not update toolchain marker ({e})")
+        return False
+    return True
 
 
 def prepare_checkout(cfg: Config) -> bool:
@@ -638,8 +717,12 @@ def prepare_checkout(cfg: Config) -> bool:
     # The checkout is quiescent here: the previous agent has exited and the next one has not started.
     # Compare canonical main, rather than an arbitrary PR branch, and retire old-toolchain artifacts
     # before anything can begin writing this worker's private Lake store again.
-    clean_lake_cache_after_toolchain_bump(cfg)
+    lake_marker_current = clean_lake_cache_after_toolchain_bump(cfg)
+    if not lake_marker_current and build_caches.lake_pool(_host_home()) is not None:
+        return False
     g("clean", "-fdq", "-e", ".lake")  # retain ignored exact-target build artifacts
+    if lake_marker_current:
+        sync_lake_pool(cfg)
     return True
 
 

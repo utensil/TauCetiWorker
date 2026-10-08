@@ -14,6 +14,14 @@ racing for the same toolchain is safe. `LAKE_CACHE_DIR` is deliberately kept per
 normally lives under the toolchain directory, it is written during builds rather than once at
 install, and nothing here has established that concurrent writers are safe.
 
+Lake's artifact store is therefore pooled the way Mathlib's is — hardlinks of COMPLETE files, never a
+shared writable directory — but more narrowly, and only when `TAUCETI_LAKE_POOL` names a pool root:
+unlike `.ltar`s there is no directory the operator's own tooling already fills, so pooling it stays an
+explicit per-lane decision. Only the content-addressed `artifacts/` subtree qualifies, only files Lake
+has already left read-only, and the pool is partitioned by toolchain generation, because a toolchain
+bump deliberately clears this worker's store and re-hydrating the previous generation would undo it.
+Completed bulk downloads that remain writable are conservatively excluded rather than chmodded.
+
 Mathlib's `.ltar` cache is NOT pooled by pointing workers at one directory, which was this module's
 first design and was wrong. `lake exe cache get` takes no lock, and until every checkout runs a
 Mathlib new enough to carry per-process temporary names (leanprover-community/mathlib4#42752), two
@@ -38,7 +46,18 @@ from pathlib import Path
 
 # Aggregate work is bounded by how many names differ between pool and worker, which after the first
 # sync is a few thousand at most. The first sync of an established worker is the expensive one.
-__all__ = ["elan_pool", "hydrate_only", "link_into", "mathlib_pool", "sync_pool", "transient", "walk"]
+__all__ = [
+    "elan_pool",
+    "hydrate_only",
+    "lake_mutable",
+    "lake_pool",
+    "lake_sealed",
+    "link_into",
+    "mathlib_pool",
+    "sync_pool",
+    "transient",
+    "walk",
+]
 
 
 def transient(rel: Path) -> bool:
@@ -53,20 +72,27 @@ def transient(rel: Path) -> bool:
     return name.endswith(".part") or (name.startswith("curl") and (name.endswith(".cfg") or "-" in name))
 
 
-def walk(root: Path, skip=None):
+def walk(root: Path, skip=None, accept=None):
     """Every poolable path under *root*, relative to it. Symlinks are never descended.
 
     *skip* is an optional extra predicate on the relative path, for callers with their own notion of
-    what does not belong in a pool — the toolchain migration uses it to leave Lake's mutable
-    per-toolchain store alone. It must be applied to LINKING as well as to deleting: pooling a
-    mutable file shares its inode, so a later in-place write reaches every worker holding the link."""
+    what does not belong in a pool — `lake_mutable` uses it to keep Lake's rewritten `outputs/` and
+    `revisions/` indexes out. It must be applied to LINKING as well as to deleting: pooling a mutable
+    file shares its inode, so a later in-place write reaches every worker holding the link.
+
+    *accept* is an optional predicate on the actual path, for callers that must inspect the file
+    rather than only name it — `lake_sealed` uses it to require the read-only seal Lake sets once an
+    artifact is complete, so a half-written name can never become the pool's version of it."""
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         here = Path(dirpath)
         for name in sorted(dirnames + filenames):
             p = here / name
             rel = p.relative_to(root)
-            if (p.is_symlink() or p.is_file()) and not transient(rel) and not (skip and skip(rel)):
-                yield rel
+            if not ((p.is_symlink() or p.is_file()) and not transient(rel) and not (skip and skip(rel))):
+                continue
+            if accept is not None and not accept(p):
+                continue
+            yield rel
 
 
 def same_device(a: Path, b: Path) -> bool:
@@ -84,7 +110,7 @@ def same_device(a: Path, b: Path) -> bool:
     return dev(a) == dev(b) != -1
 
 
-def link_into(src: Path, dst: Path, skip=None) -> tuple[int, int]:
+def link_into(src: Path, dst: Path, skip=None, accept=None) -> tuple[int, int]:
     """Hardlink every finished file under *src* into *dst*, never replacing what is already there.
 
     Returns (linked, already present). An existing name is left strictly alone: that is what keeps
@@ -95,7 +121,7 @@ def link_into(src: Path, dst: Path, skip=None) -> tuple[int, int]:
     linked = present = 0
     if not src.is_dir() or not same_device(src, dst):
         return (0, 0)
-    for rel in walk(src, skip):
+    for rel in walk(src, skip, accept):
         source, target = src / rel, dst / rel
         if target.exists() or target.is_symlink():
             present += 1
@@ -143,7 +169,7 @@ def hydrate_only(pool: Path, private: Path) -> tuple[int, int]:
     return link_into(pool, private)
 
 
-def sync_pool(private: Path, pool: Path) -> tuple[int, int]:
+def sync_pool(private: Path, pool: Path, skip=None, accept=None) -> tuple[int, int]:
     """Exchange finished artifacts between one worker's cache and the machine pool.
 
     Promote first, then hydrate: the worker's own downloads reach the pool before it takes the pool's,
@@ -154,6 +180,48 @@ def sync_pool(private: Path, pool: Path) -> tuple[int, int]:
     if not private.is_dir():
         private.mkdir(parents=True, exist_ok=True)
     pool.mkdir(parents=True, exist_ok=True)
-    promoted, _ = link_into(private, pool)
-    hydrated, _ = link_into(pool, private)
+    promoted, _ = link_into(private, pool, skip=skip, accept=accept)
+    hydrated, _ = link_into(pool, private, skip=skip, accept=accept)
     return (promoted, hydrated)
+
+
+def lake_pool(host_home: Path, generation: str = "", env: dict[str, str] | None = None) -> Path | None:
+    """Where the machine keeps its shared Lake artifacts, or None when pooling is not switched on.
+
+    `TAUCETI_LAKE_POOL` names a pool ROOT rather than one directory, because the store is partitioned
+    by *generation* — the digest recorded from the canonical-main toolchain. `clean_lake_cache_after_
+    toolchain_bump` deliberately clears this worker's owned store when that toolchain changes; a
+    single flat pool would immediately re-hydrate the previous generation's artifacts and undo the
+    cleanup. Partitioning does not prune old generations; that remains an operator decision.
+
+    Unlike `mathlib_pool` there is no fallback: nothing an operator's interactive tooling already
+    fills, and a store this writable must not be pooled by accident."""
+    env = os.environ if env is None else env
+    root = env.get("TAUCETI_LAKE_POOL")
+    if not root:
+        return None
+    return Path(root) / generation if generation else Path(root)
+
+
+def lake_mutable(rel: Path) -> bool:
+    """Is this a path Lake rewrites in place? `walk`'s skip hook for the Lake store.
+
+    Only `artifacts/` is content-addressed by file hash, and Lake only ever adds to it. `outputs/`
+    and `revisions/` are indexes it rewrites, so they must never enter the pool: a link shares the
+    inode, and an in-place write through one worker's path would reach every holder of it."""
+    return not (len(rel.parts) > 1 and rel.parts[0] == "artifacts")
+
+
+def lake_sealed(path: Path) -> bool:
+    """Is this artifact read-only? `walk`'s conservative accept hook for the Lake store.
+
+    Writable names are excluded even though Lake's bulk cache-get path can leave completed downloads
+    writable. Pooling does not chmod them or infer completion from their names: read-only is the only
+    seal established here before a name can become the pool's version for every worker, and
+    `link_into` deliberately never redefines a name the pool already holds."""
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        return not path.stat().st_mode & 0o222
+    except OSError:
+        return False
