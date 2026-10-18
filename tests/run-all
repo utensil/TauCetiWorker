@@ -28,6 +28,7 @@ RUN_STDLIB=(
   auto_stage_priority.py
   authoring_profiles.py
   bounded_native_round.py
+  bounded_cache_pool.py
   bubble_cache.py
   bubble_version.py
   branch_claim_repo.py

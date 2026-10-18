@@ -276,8 +276,11 @@ def main():
             env["TAUCETI_LAKE_POOL"] = str(pool)
 
             canonical_pins = [b"leanprover/lean4:canonical-one\n"]
+            real_run = tc.agents.subprocess.run
 
             def git_run(argv, *args, **kwargs):
+                if argv[0] != "git":
+                    return real_run(argv, *args, **kwargs)
                 if "checkout" in argv:
                     toolchain.write_bytes(canonical_pins[0])
                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")

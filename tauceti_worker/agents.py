@@ -463,7 +463,7 @@ def sync_mathlib_pool(cfg: Config) -> None:
     if private.resolve() == pool.resolve():
         return  # operator pointed this worker straight at the pool; nothing to exchange
     try:
-        promoted, hydrated = build_caches.sync_pool(private, pool)
+        promoted, hydrated = build_caches.sync_pool_bounded(private, pool)
     except OSError as e:
         log(f"mathlib cache pool: skipped ({e})")
         return
@@ -534,9 +534,7 @@ def sync_lake_pool(cfg: Config) -> None:
         return
     pool = pool_root / generation
     try:
-        promoted, hydrated = build_caches.sync_pool(
-            private, pool, skip=build_caches.lake_mutable, accept=build_caches.lake_sealed
-        )
+        promoted, hydrated = build_caches.sync_pool_bounded(private, pool, lake=True)
     except OSError as e:
         log(f"lake artifact pool: skipped ({e})")
         return
