@@ -51,6 +51,8 @@ empty shell, or invent replacement scope. A failing check alone is not a reason 
 - Must end green AND axiom-clean: no `sorry`, no `native_decide`, no new axioms (allowlist: `propext`, `Classical.choice`, `Quot.sound`), no `maxHeartbeats` overrides, and **never silence a linter** (e.g. with `set_option ... false`) to force the build green — that defeats the point.
 
 ## Verify before pushing (ALL of these MUST pass — they are exactly what the `build` check runs)
+Use the supported local PR lint invocations below when selecting lint scope or handling macOS
+argument limits; every required check must still finish successfully before publication.
 ```
 set -e
 lake exe cache get
@@ -76,11 +78,50 @@ Launch each verification command once in the foreground, with a generous timeout
 yields a session id, poll that same session until it finishes; do not launch a duplicate build or
 audit. If the session handle is lost, inspect the process and its result before proceeding, and do
 not restart the command until the prior process is known to have ended. Require a successful
-terminal result for every verification command before committing or pushing.
+terminal result for every required check before publishing. A local candidate commit for
+exact lint-scope calculation is allowed under the instructions below.
 
 **Do this synchronously, in this one turn.** Run these commands in the FOREGROUND and wait for each to finish — do NOT background the build and then end your turn expecting to be resumed. You are running non-interactively; nothing will resume you, so a build left running in the background is abandoned and the round ends with nothing committed or pushed. Unless a stop condition above applies, do not yield, stop, or end your turn until you have committed and pushed (below). If publication is blocked, preserve the local candidate and report the exact blocker.
 
 A lint driver error is a failed check, not a pass. On macOS use GNU Bash and GNU sed for these scripts. Require terminal exit zero from every check; if a tool returns a session id, poll that same invocation until it ends.
+
+### Local PR lint scope and macOS argument limits
+
+Use the repository's actual lint policy, not a blanket exemption for unrelated failures.
+For an existing ordinary PR, inspect its current labels and branch before linting and again
+before publishing. If it is labelled `full-lint`, is a `lint-repair/*` branch, or the policy
+cannot be verified, run full environment lint with `LINT_ONLY_MODULES` unset. Otherwise the
+repository supports changed-module environment lint. Read its `scripts/lint-scope.sh` and
+`scripts/lint_scope_files.py`; use that same local file-discovery helper against the complete
+candidate and its merge base with the current base branch. An unpublished candidate cannot
+be compared through GitHub's compare API: use exact local Git objects. A local candidate
+commit before validation is permitted; it must include all intended source edits and new
+files, must remain unpublished until verification passes, and must be revalidated if changed.
+
+Write the helper's NUL-delimited changed-file output to the round scratch directory, convert
+existing canonical `TauCeti/.../*.lean` paths to module names exactly as `lint-scope.sh` does,
+and verify that the list covers the complete proposed PR diff, not just this repair's last
+commit. Run `LINT_ONLY_MODULES=<absolute-module-list> bash scripts/lint-env.sh`. Do not hand-pick
+only passing declarations, change the baseline/allowlist, suppress a linter, or relabel a PR
+to narrow scope. The existing script still performs its whole-library documentation and
+nolint audits. Report the selected scope and terminal result, along with any earlier full-lint
+failure. Passing scoped lint does not establish that the whole library passes full lint.
+
+If `lint-style.sh` fails on macOS with `Argument list too long`, that invocation failed.
+Complete the SAME checks without dropping files: use the unmodified `source-modules.sh`
+discovery function to produce the complete validated file/module lists; run the unmodified
+`HeaderStyle.lean` on every file in bounded batches (at most 1000 paths per call, smaller if
+needed); require every batch to exit zero. Generate the same temporary `TauCetiLint.All`
+import root as `lint-style.sh`, containing `import TauCeti` plus every discovered module,
+check its import count, and run `lake exe lint-style TauCetiLint.All TauCeti` with that
+root on `LEAN_SRC_PATH`. Run any additional checks present in the current style driver too.
+Preserve its package filter and every diagnostic. Require terminal exit zero, record the
+complete file count, and remove only your own temporary driver directory. Never edit the
+repository's lint scripts or claim the failed one-command invocation passed.
+
+These supported invocation changes do not replace the full build, axiom or module-system
+audits. Preserve their successful exact-candidate results; repeat checks when source or
+inputs changed, not merely because a later lint driver failed.
 
 ## Submit
 Repeat the remaining-contribution check above with the proposed repair included
