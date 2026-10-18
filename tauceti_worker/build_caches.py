@@ -41,11 +41,16 @@ unchanged by all this, since a link is not a copy.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
-# Aggregate work is bounded by how many names differ between pool and worker, which after the first
-# sync is a few thousand at most. The first sync of an established worker is the expensive one.
+# Even an unchanged pool requires a full directory scan. Keep that optional work out of the
+# authoring critical path when a large store or a busy filesystem makes metadata access slow.
+POOL_SYNC_TIMEOUT_S = 60
+
 __all__ = [
     "elan_pool",
     "hydrate_only",
@@ -55,6 +60,7 @@ __all__ = [
     "link_into",
     "mathlib_pool",
     "sync_pool",
+    "sync_pool_bounded",
     "transient",
     "walk",
 ]
@@ -183,6 +189,48 @@ def sync_pool(private: Path, pool: Path, skip=None, accept=None) -> tuple[int, i
     promoted, _ = link_into(private, pool, skip=skip, accept=accept)
     hydrated, _ = link_into(pool, private, skip=skip, accept=accept)
     return (promoted, hydrated)
+
+
+def sync_pool_bounded(
+    private: Path, pool: Path, *, lake: bool = False, timeout_s: float = POOL_SYNC_TIMEOUT_S
+) -> tuple[int, int]:
+    """Exchange optional caches in a child that is killed and reaped on timeout.
+
+    A deadline inside ``walk`` cannot interrupt a slow directory listing or stat. The child only
+    adds complete files by atomic links, so completed links remain safe if it is interrupted;
+    existing names, private downloads, and mutable Lake indexes are never replaced.
+    """
+    command = [
+        sys.executable,
+        "-c",
+        "import json, sys; from pathlib import Path; from tauceti_worker import build_caches as c; "
+        "lake = sys.argv[3] == '1'; "
+        "print(json.dumps(c.sync_pool(Path(sys.argv[1]), Path(sys.argv[2]), "
+        "skip=c.lake_mutable if lake else None, accept=c.lake_sealed if lake else None)))",
+        str(private),
+        str(pool),
+        "1" if lake else "0",
+    ]
+    # Import the invoking revision even for an installed CLI or a caller in a different checkout.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(Path(__file__).resolve().parent.parent), env.get("PYTHONPATH")))
+    )
+    try:
+        result = subprocess.run(
+            command, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout_s
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"optional cache exchange exceeded {timeout_s:g}s; private caches retained") from exc
+    if result.returncode:
+        raise OSError(f"optional cache exchange exited {result.returncode}; private caches retained")
+    try:
+        counts = json.loads(result.stdout)
+        if not isinstance(counts, list) or len(counts) != 2 or any(type(n) is not int or n < 0 for n in counts):
+            raise ValueError("invalid counts")
+        return tuple(counts)
+    except (ValueError, TypeError) as exc:
+        raise OSError("optional cache exchange returned invalid counts; private caches retained") from exc
 
 
 def lake_pool(host_home: Path, generation: str = "", env: dict[str, str] | None = None) -> Path | None:
